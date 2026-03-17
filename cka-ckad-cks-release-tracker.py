@@ -38,7 +38,7 @@ UA = "cka-ckad-cks-release-tracker/1.0"
 CERTS = ("CKA", "CKAD", "CKS")
 HISTORICAL = 7  # released versions to show (supported + recent unsupported)
 PREDICTION_WINDOW = 4  # last N releases used for average lag
-SEP = "│"  # U+2502 BOX DRAWINGS LIGHT VERTICAL — visual separator column
+
 
 # Filename patterns per cert (tried in order — Tactic D)
 CERT_FILE_PATTERNS = {
@@ -321,8 +321,8 @@ def format_table(cert, rows, avg_lag, day_name, today):
     lines.append(f"### {cert}")
     lines.append("")
 
-    h = f"| K8s  | K8s GA      | {SEP} | {cert} Switch | Day  | Days |"
-    s = f"|:-----|:------------|:---:|:------------|:----:|:----:|"
+    h = f"| K8s  | K8s GA      | {cert} Switch | Day  | Days |"
+    s = f"|:-----|:------------|:------------|:----:|:----:|"
     if has_overdue:
         h += " Overdue |"
         s += ":------:|"
@@ -343,7 +343,7 @@ def format_table(cert, rows, avg_lag, day_name, today):
             sw_str = "—"
             day_str = ""
             delta_str = "—"
-        row = f"| {minor:<4} | {ga_str:<11} | {SEP} | {sw_str:<11} | {day_str:<4} | {delta_str:>4} |"
+        row = f"| {minor:<4} | {ga_str:<11} | {sw_str:<11} | {day_str:<4} | {delta_str:>4} |"
         if has_overdue:
             if sw_pred and switch and switch < today:
                 overdue = (today - switch).days

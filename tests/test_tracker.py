@@ -95,13 +95,16 @@ class TestIntent1Structure:
         assert len(table_lines) >= 3, "Need header + separator + at least 1 data row"
         assert table_lines[1].startswith("|:"), "Second line must be alignment separator"
 
-    def test_separator_column_present(self):
+    def test_columns_present(self):
         rows = [
             ("1.35", date(2025, 12, 17), date(2026, 3, 3), True, False, False),
         ]
         lines = tracker.format_table("CKA", rows, 69, "Tue", date(2026, 3, 17))
-        text = "\n".join(lines)
-        assert "│" in text, "Box-drawing separator column missing"
+        header = [l for l in lines if l.startswith("|")][0]
+        assert "K8s GA" in header
+        assert "CKA Switch" in header
+        assert "Day" in header
+        assert "Days" in header
 
     def test_legend_present(self):
         rows = [
