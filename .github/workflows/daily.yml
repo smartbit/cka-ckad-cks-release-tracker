@@ -28,8 +28,17 @@ jobs:
         if: steps.run.outputs.rc == '0' || steps.run.outputs.rc == '1'
         id: update
         run: |
-          BADGE='![last updated](https://img.shields.io/github/last-commit/smartbit/cka-ckad-cks-release-tracker?label=updated)'
-          { echo "$BADGE"; echo ''; cat tables.md; } > README.new
+          # Preserve footer (badges etc.) from existing README
+          footer=""
+          if [ -f README.md ] && grep -q '<!-- footer -->' README.md; then
+            footer=$(sed -n '/<!-- footer -->/,$p' README.md)
+          fi
+          # Build new README: generated tables + preserved footer
+          if [ -n "$footer" ]; then
+            { cat tables.md; echo "$footer"; } > README.new
+          else
+            cat tables.md > README.new
+          fi
           if [ -f README.md ] && diff -q README.md README.new > /dev/null 2>&1; then
             echo "changed=false" >> "$GITHUB_OUTPUT"
           else
