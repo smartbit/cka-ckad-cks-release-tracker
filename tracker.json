@@ -1,0 +1,27 @@
+{
+  "updated": "2026-03-18",
+  "CKA": {
+    "version": "1.35",
+    "topics_changed": false,
+    "overdue": false,
+    "version_in_1w": "1.35",
+    "version_in_2w": "1.35",
+    "version_in_1m": "1.35"
+  },
+  "CKAD": {
+    "version": "1.35",
+    "topics_changed": false,
+    "overdue": false,
+    "version_in_1w": "1.35",
+    "version_in_2w": "1.35",
+    "version_in_1m": "1.35"
+  },
+  "CKS": {
+    "version": "1.34",
+    "topics_changed": false,
+    "overdue": true,
+    "version_in_1w": "1.35",
+    "version_in_2w": "1.35",
+    "version_in_1m": "1.35"
+  }
+}

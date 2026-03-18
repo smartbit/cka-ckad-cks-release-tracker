@@ -3,7 +3,8 @@ Tests for cka-ckad-cks-release-tracker.
 
 Intent 1: Quickly see when the next change in exam release is to be expected.
 Intent 2: Warn for changes in the topics.
-Intent 3: Low maintenance — detect failures, archive after 30 days.
+Intent 3: Machine-readable output for downstream automation.
+Intent 4: Low maintenance — detect failures, archive after 30 days.
 """
 
 import importlib.util
@@ -325,7 +326,7 @@ class TestIntent2TopicChanges:
              patch.object(tracker, "cert_switch_date", side_effect=mock_cert_switch), \
              patch.object(tracker, "next_release_date", return_value=date(2026, 4, 22)), \
              patch.object(tracker, "diff_curricula", side_effect=mock_diff):
-            output, code = tracker.generate(today=date(2026, 3, 17))
+            output, code, _ = tracker.generate(today=date(2026, 3, 17))
 
         # CKA has a footnote → legend should end with <br>
         lines = output.split("\n")
@@ -348,7 +349,7 @@ class TestIntent2TopicChanges:
              patch.object(tracker, "cert_switch_date", side_effect=mock_cert_switch), \
              patch.object(tracker, "next_release_date", return_value=date(2026, 4, 22)), \
              patch.object(tracker, "diff_curricula", return_value=([], {})):
-            output, code = tracker.generate(today=date(2026, 3, 17))
+            output, code, _ = tracker.generate(today=date(2026, 3, 17))
 
         for line in output.split("\n"):
             if line.startswith("~ Predicted:"):
@@ -377,7 +378,7 @@ class TestIntent2TopicChanges:
              patch.object(tracker, "cert_switch_date", side_effect=mock_cert_switch), \
              patch.object(tracker, "next_release_date", return_value=date(2026, 4, 22)), \
              patch.object(tracker, "diff_curricula", side_effect=mock_diff):
-            output, code = tracker.generate(today=date(2026, 3, 17))
+            output, code, _ = tracker.generate(today=date(2026, 3, 17))
 
         lines = output.split("\n")
         # Find the CKA footnotes (¹ and ²)
@@ -387,9 +388,191 @@ class TestIntent2TopicChanges:
         assert not fn_lines[1].endswith("<br>"), "Last footnote should not end with <br>"
 
 
-# --- Intent 3: Schema validation catches bad data ---
+# --- Intent 3: Machine-readable output for downstream automation ---
 
-class TestIntent3Validation:
+class TestIntent3TrackerJson:
+    """Machine-readable output for downstream automation."""
+
+    def test_tracker_data_has_all_certs(self):
+        """tracker_data includes entries for CKA, CKAD, CKS."""
+        tracker._errors.clear()
+
+        def mock_cert_switch(cert, minor):
+            return {"1.35": date(2026, 3, 3), "1.34": date(2025, 10, 28)}.get(minor)
+
+        with patch.object(tracker, "released_versions", return_value=SAMPLE_ENDOFLIFE), \
+             patch.object(tracker, "cert_switch_date", side_effect=mock_cert_switch), \
+             patch.object(tracker, "next_release_date", return_value=date(2026, 4, 22)), \
+             patch.object(tracker, "diff_curricula", return_value=([], {})):
+            _, _, data = tracker.generate(today=date(2026, 3, 17))
+
+        assert "CKA" in data
+        assert "CKAD" in data
+        assert "CKS" in data
+
+    def test_tracker_data_version_is_current(self):
+        """version reflects the most recent actual (non-predicted) switch."""
+        tracker._errors.clear()
+
+        def mock_cert_switch(cert, minor):
+            return {"1.35": date(2026, 3, 3), "1.34": date(2025, 10, 28)}.get(minor)
+
+        with patch.object(tracker, "released_versions", return_value=SAMPLE_ENDOFLIFE), \
+             patch.object(tracker, "cert_switch_date", side_effect=mock_cert_switch), \
+             patch.object(tracker, "next_release_date", return_value=date(2026, 4, 22)), \
+             patch.object(tracker, "diff_curricula", return_value=([], {})):
+            _, _, data = tracker.generate(today=date(2026, 3, 17))
+
+        assert data["CKA"]["version"] == "1.35"
+        assert data["CKAD"]["version"] == "1.35"
+        assert data["CKS"]["version"] == "1.35"
+
+    def test_tracker_data_topics_changed_true(self):
+        """topics_changed is true when curriculum changed for the current version."""
+        tracker._errors.clear()
+
+        def mock_cert_switch(cert, minor):
+            return {"1.35": date(2026, 3, 3), "1.34": date(2025, 10, 28)}.get(minor)
+
+        def mock_diff(cert, versions):
+            if cert == "CKA":
+                return [("1.34", "1.35", "changed-no-detail", [])], {
+                    "1.34": ("a", "old-versions/CKA_Curriculum_v1.34.pdf"),
+                    "1.35": ("b", "CKA_Curriculum_v1.35.pdf"),
+                }
+            return [], {}
+
+        with patch.object(tracker, "released_versions", return_value=SAMPLE_ENDOFLIFE), \
+             patch.object(tracker, "cert_switch_date", side_effect=mock_cert_switch), \
+             patch.object(tracker, "next_release_date", return_value=date(2026, 4, 22)), \
+             patch.object(tracker, "diff_curricula", side_effect=mock_diff):
+            _, _, data = tracker.generate(today=date(2026, 3, 17))
+
+        assert data["CKA"]["topics_changed"] is True
+        assert data["CKAD"]["topics_changed"] is False
+
+    def test_tracker_data_updated_field(self):
+        """updated field matches the today parameter."""
+        tracker._errors.clear()
+
+        def mock_cert_switch(cert, minor):
+            return {"1.35": date(2026, 3, 3), "1.34": date(2025, 10, 28)}.get(minor)
+
+        with patch.object(tracker, "released_versions", return_value=SAMPLE_ENDOFLIFE), \
+             patch.object(tracker, "cert_switch_date", side_effect=mock_cert_switch), \
+             patch.object(tracker, "next_release_date", return_value=date(2026, 4, 22)), \
+             patch.object(tracker, "diff_curricula", return_value=([], {})):
+            _, _, data = tracker.generate(today=date(2026, 3, 17))
+
+        assert data["updated"] == "2026-03-17"
+
+    def test_tracker_data_none_on_failure(self):
+        """tracker_data is None when generate() fails."""
+        tracker._errors.clear()
+        with patch.object(tracker, "released_versions", return_value=None):
+            _, code, data = tracker.generate(today=date(2026, 3, 17))
+        assert code == 2
+        assert data is None
+
+    def test_tracker_data_structure(self):
+        """Each cert entry has all required fields with correct types."""
+        tracker._errors.clear()
+
+        def mock_cert_switch(cert, minor):
+            return {"1.35": date(2026, 3, 3), "1.34": date(2025, 10, 28)}.get(minor)
+
+        with patch.object(tracker, "released_versions", return_value=SAMPLE_ENDOFLIFE), \
+             patch.object(tracker, "cert_switch_date", side_effect=mock_cert_switch), \
+             patch.object(tracker, "next_release_date", return_value=date(2026, 4, 22)), \
+             patch.object(tracker, "diff_curricula", return_value=([], {})):
+            _, _, data = tracker.generate(today=date(2026, 3, 17))
+
+        for cert in ("CKA", "CKAD", "CKS"):
+            assert isinstance(data[cert]["version"], str)
+            assert isinstance(data[cert]["topics_changed"], bool)
+            assert isinstance(data[cert]["overdue"], bool)
+            assert isinstance(data[cert]["version_in_1w"], str)
+            assert isinstance(data[cert]["version_in_2w"], str)
+            assert isinstance(data[cert]["version_in_1m"], str)
+
+    def test_tracker_data_overdue_false(self):
+        """overdue is false when no predicted switch is past due."""
+        tracker._errors.clear()
+
+        def mock_cert_switch(cert, minor):
+            return {"1.35": date(2026, 3, 3), "1.34": date(2025, 10, 28)}.get(minor)
+
+        with patch.object(tracker, "released_versions", return_value=SAMPLE_ENDOFLIFE), \
+             patch.object(tracker, "cert_switch_date", side_effect=mock_cert_switch), \
+             patch.object(tracker, "next_release_date", return_value=date(2026, 4, 22)), \
+             patch.object(tracker, "diff_curricula", return_value=([], {})):
+            _, _, data = tracker.generate(today=date(2026, 3, 17))
+
+        for cert in ("CKA", "CKAD", "CKS"):
+            assert data[cert]["overdue"] is False
+
+    def test_tracker_data_overdue_true(self):
+        """overdue is true when a predicted switch is past due."""
+        tracker._errors.clear()
+
+        def mock_cert_switch(cert, minor):
+            # CKS has no 1.35 switch → prediction will be in the past
+            if cert == "CKS":
+                return {"1.34": date(2025, 10, 28)}.get(minor)
+            return {"1.35": date(2026, 3, 3), "1.34": date(2025, 10, 28)}.get(minor)
+
+        with patch.object(tracker, "released_versions", return_value=SAMPLE_ENDOFLIFE), \
+             patch.object(tracker, "cert_switch_date", side_effect=mock_cert_switch), \
+             patch.object(tracker, "next_release_date", return_value=date(2026, 4, 22)), \
+             patch.object(tracker, "diff_curricula", return_value=([], {})):
+            _, _, data = tracker.generate(today=date(2026, 3, 17))
+
+        assert data["CKS"]["overdue"] is True
+        assert data["CKS"]["version"] == "1.34"
+        assert data["CKA"]["overdue"] is False
+
+    def test_tracker_data_version_in_no_upcoming_switch(self):
+        """version_in_X equals current version when no switch is predicted within horizon."""
+        tracker._errors.clear()
+
+        def mock_cert_switch(cert, minor):
+            return {"1.35": date(2026, 3, 3), "1.34": date(2025, 10, 28)}.get(minor)
+
+        with patch.object(tracker, "released_versions", return_value=SAMPLE_ENDOFLIFE), \
+             patch.object(tracker, "cert_switch_date", side_effect=mock_cert_switch), \
+             patch.object(tracker, "next_release_date", return_value=date(2026, 4, 22)), \
+             patch.object(tracker, "diff_curricula", return_value=([], {})):
+            _, _, data = tracker.generate(today=date(2026, 3, 17))
+
+        # Next switch (1.36) predicted ~June 2026, well beyond all horizons
+        assert data["CKA"]["version_in_1w"] == "1.35"
+        assert data["CKA"]["version_in_2w"] == "1.35"
+        assert data["CKA"]["version_in_1m"] == "1.35"
+
+    def test_tracker_data_version_in_with_overdue_switch(self):
+        """version_in_X reflects the overdue predicted version."""
+        tracker._errors.clear()
+
+        def mock_cert_switch(cert, minor):
+            if cert == "CKS":
+                return {"1.34": date(2025, 10, 28)}.get(minor)
+            return {"1.35": date(2026, 3, 3), "1.34": date(2025, 10, 28)}.get(minor)
+
+        with patch.object(tracker, "released_versions", return_value=SAMPLE_ENDOFLIFE), \
+             patch.object(tracker, "cert_switch_date", side_effect=mock_cert_switch), \
+             patch.object(tracker, "next_release_date", return_value=date(2026, 4, 22)), \
+             patch.object(tracker, "diff_curricula", return_value=([], {})):
+            _, _, data = tracker.generate(today=date(2026, 3, 17))
+
+        # CKS 1.35 predicted switch is overdue → all horizons show 1.35
+        assert data["CKS"]["version_in_1w"] == "1.35"
+        assert data["CKS"]["version_in_2w"] == "1.35"
+        assert data["CKS"]["version_in_1m"] == "1.35"
+
+
+# --- Intent 4: Schema validation catches bad data ---
+
+class TestIntent4Validation:
     """Schema validation detects API changes early."""
 
     def test_valid_endoflife_response(self):
@@ -422,18 +605,19 @@ class TestIntent3Validation:
             tracker.validate_commits("not a list")
 
 
-# --- Intent 3: Exit codes for workflow ---
+# --- Intent 4: Exit codes for workflow ---
 
-class TestIntent3ExitCodes:
+class TestIntent4ExitCodes:
     """Script exits with correct codes so the workflow knows what to do."""
 
     def test_exit_2_when_no_versions(self):
         """Critical failure when K8s versions can't be fetched."""
         tracker._errors.clear()
         with patch.object(tracker, "released_versions", return_value=None):
-            output, code = tracker.generate(today=date(2026, 3, 17))
+            output, code, data = tracker.generate(today=date(2026, 3, 17))
         assert code == 2
         assert output is None
+        assert data is None
 
     def test_exit_0_when_all_ok(self):
         """Success when all data is available."""
@@ -447,7 +631,7 @@ class TestIntent3ExitCodes:
              patch.object(tracker, "cert_switch_date", side_effect=mock_cert_switch), \
              patch.object(tracker, "next_release_date", return_value=date(2026, 4, 22)), \
              patch.object(tracker, "diff_curricula", return_value=([], {})):
-            output, code = tracker.generate(today=date(2026, 3, 17))
+            output, code, data = tracker.generate(today=date(2026, 3, 17))
 
         assert code == 0
         assert output is not None
@@ -455,6 +639,7 @@ class TestIntent3ExitCodes:
         assert "### CKAD" in output
         assert "### CKS" in output
         assert "EOL" in output  # global footer
+        assert data is not None
 
 
 # --- Pure function tests ---

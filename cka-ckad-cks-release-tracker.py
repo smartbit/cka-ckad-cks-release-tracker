@@ -4,7 +4,8 @@ Generates markdown tracking Kubernetes cert exam release adoption.
 
 Intent 1: Quickly see when the next change in exam release is to be expected.
 Intent 2: Warn for changes in the topics.
-Intent 3: Low maintenance — detect failures, archive after 30 days.
+Intent 3: Machine-readable output for downstream automation.
+Intent 4: Low maintenance — detect failures, archive after 30 days.
 
 Data sources (with fallbacks — Tactic D):
   - endoflife.date/api/kubernetes.json     → fallback: GitHub kubernetes/kubernetes releases API
@@ -651,13 +652,13 @@ def generate_diff(cert, versions):
 # --- Main ---
 
 def generate(today=None):
-    """Generate the markdown output. Returns (output_string, exit_code)."""
+    """Generate the markdown output. Returns (output_string, exit_code, tracker_data)."""
     if today is None:
         today = date.today()
 
     all_versions = released_versions()
     if not all_versions:
-        return None, 2
+        return None, 2, None
 
     latest = all_versions[0]
     latest_minor = int(latest["cycle"].split(".")[1])
@@ -671,6 +672,7 @@ def generate(today=None):
     lines = []
     certs_with_data = 0
     footnote_num = 0
+    tracker_data = {"updated": today.isoformat()}
     for cert in CERTS:
         rows, avg_lag, day_name = build_cert_data(cert, all_versions, next_minor, next_ga, today)
         # Check if we got any actual switch data
@@ -683,6 +685,33 @@ def generate(today=None):
         row_order = [r[0] for r in rows]
         markers, footnotes, footnote_num = build_topic_footnotes(cert, diffs, file_info, row_order, footnote_num)
 
+        # Intent 3: machine-readable data for downstream automation
+        current_version = None
+        overdue = False
+        for minor, ga, switch, supported, ga_pred, sw_pred in rows:
+            if switch and not sw_pred:
+                current_version = minor
+                break
+            if sw_pred and switch and switch < today:
+                overdue = True
+
+        cert_entry = {
+            "version": current_version,
+            "topics_changed": current_version in markers if current_version else False,
+            "overdue": overdue,
+        }
+
+        for key, days in (("version_in_1w", 7), ("version_in_2w", 14), ("version_in_1m", 30)):
+            horizon = today + timedelta(days=days)
+            predicted_ver = current_version
+            for minor, ga, switch, supported, ga_pred, sw_pred in rows:
+                if switch and switch <= horizon:
+                    predicted_ver = minor
+                    break
+            cert_entry[key] = predicted_ver
+
+        tracker_data[cert] = cert_entry
+
         lines.extend(format_table(cert, rows, avg_lag, day_name, today, markers))
         if footnotes:
             lines[-1] += "<br>"
@@ -693,7 +722,7 @@ def generate(today=None):
 
     if certs_with_data == 0:
         log_error("output", "No actual cert switch data found for any cert")
-        return None, 2
+        return None, 2, None
 
     lines.append("\\* EOL (end of life)")
     lines.append("")
@@ -702,7 +731,7 @@ def generate(today=None):
 
     # Exit code: 0=ok, 1=degraded (some errors but output is usable)
     exit_code = 1 if _errors else 0
-    return output, exit_code
+    return output, exit_code, tracker_data
 
 
 def main():
@@ -727,7 +756,7 @@ def main():
         print("\n".join(lines), end="")
         sys.exit(1 if _errors else 0)
 
-    output, exit_code = generate()
+    output, exit_code, tracker_data = generate()
 
     if _errors:
         print(f"\n--- Errors ({len(_errors)}) ---", file=sys.stderr)
@@ -738,6 +767,11 @@ def main():
         print(output, end="")
     else:
         print("FATAL: Could not generate output", file=sys.stderr)
+
+    if tracker_data:
+        with open("tracker.json", "w") as f:
+            json.dump(tracker_data, f, indent=2)
+            f.write("\n")
 
     sys.exit(exit_code)
 
