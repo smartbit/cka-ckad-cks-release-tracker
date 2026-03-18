@@ -1,5 +1,3 @@
-\![last updated](https://img.shields.io/github/last-commit/smartbit/cka-ckad-cks-release-tracker?label=updated)
-
 ### CKA
 
 | K8s  | K8s GA      | CKA Switch | Day  | Days |
@@ -44,4 +42,10 @@
 | 1.29 | 2023-12-13* | 2024-02-13  | Tue  |   62 |        |
 
 ~ Predicted: K8s GA + 68d avg (last 4), nearest Tue<br/>\* EOL (end of life)
+
+[![Last updated](https://img.shields.io/github/last-commit/smartbit/cka-ckad-cks-release-tracker?style=for-the-badge&label=updated)](https://github.com/smartbit/cka-ckad-cks-release-tracker/commits/main)
+[![Tests](https://img.shields.io/github/actions/workflow/status/smartbit/cka-ckad-cks-release-tracker/daily.yml?branch=main&style=for-the-badge&logo=github&label=Tests)](https://github.com/smartbit/cka-ckad-cks-release-tracker/actions/workflows/daily.yml)
+[![Python](https://img.shields.io/badge/python-3.9+-3776AB?style=for-the-badge&logo=python&logoColor=white)](https://www.python.org)
+[![License](https://img.shields.io/github/license/smartbit/cka-ckad-cks-release-tracker?style=for-the-badge)](LICENSE)
+[![GitHub stars](https://img.shields.io/github/stars/smartbit/cka-ckad-cks-release-tracker?style=for-the-badge&logo=github&color=181717)](https://github.com/smartbit/cka-ckad-cks-release-tracker)
 
