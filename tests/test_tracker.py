@@ -2,7 +2,8 @@
 Tests for cka-ckad-cks-release-tracker.
 
 Intent 1: Quickly see when the next change in exam release is to be expected.
-Intent 2: Low maintenance — detect failures, archive after 30 days.
+Intent 2: Warn for changes in the topics.
+Intent 3: Low maintenance — detect failures, archive after 30 days.
 """
 
 import importlib.util
@@ -113,12 +114,282 @@ class TestIntent1Structure:
         lines = tracker.format_table("CKA", rows, 69, "Tue", date(2026, 3, 17))
         text = "\n".join(lines)
         assert "~ Predicted:" in text
-        assert "EOL" in text
+
+    def test_marker_on_switch_date(self):
+        """Superscript marker appears next to the switch date with a space."""
+        rows = [
+            ("1.32", date(2024, 12, 11), date(2025, 2, 17), False, False, False),
+        ]
+        markers = {"1.32": "¹"}
+        lines = tracker.format_table("CKA", rows, 69, "Tue", date(2026, 3, 17), markers)
+        text = "\n".join(lines)
+        assert "2025-02-17 ¹" in text
+
+    def test_no_marker_when_unchanged(self):
+        """No superscript on switch dates without topic changes."""
+        rows = [
+            ("1.33", date(2025, 4, 23), date(2025, 7, 3), True, False, False),
+        ]
+        lines = tracker.format_table("CKA", rows, 69, "Tue", date(2026, 3, 17))
+        text = "\n".join(lines)
+        assert "2025-07-03" in text
+        assert "¹" not in text
 
 
-# --- Intent 2: Schema validation catches bad data ---
+# --- Intent 2: Warn for changes in the topics ---
 
-class TestIntent2Validation:
+class TestIntent2TopicChanges:
+    """Warn for changes in the topics."""
+
+    def test_match_cert_version_cka(self):
+        assert tracker._match_cert_version("CKA", "CKA_Curriculum_v1.35.pdf") == "1.35"
+
+    def test_match_cert_version_cks_space(self):
+        assert tracker._match_cert_version("CKS", "CKS_Curriculum v1.31.pdf") == "1.31"
+
+    def test_match_cert_version_no_match(self):
+        assert tracker._match_cert_version("CKA", "CKAD_Curriculum_v1.35.pdf") is None
+        assert tracker._match_cert_version("CKA", "readme.txt") is None
+
+    def test_identical_shas_skips_download(self):
+        """Method 6: identical blob SHAs → 'identical' without downloading PDFs."""
+        shas = {
+            "1.32": ("abc123", "CKA_Curriculum_v1.32.pdf"),
+            "1.33": ("abc123", "CKA_Curriculum_v1.33.pdf"),
+            "1.34": ("abc123", "CKA_Curriculum_v1.34.pdf"),
+        }
+        with patch.object(tracker, "get_curriculum_shas", return_value=shas), \
+             patch.object(tracker, "download_pdf") as mock_dl:
+            results, _ = tracker.diff_curricula("CKA", ["1.32", "1.33", "1.34"])
+        mock_dl.assert_not_called()
+        assert len(results) == 2
+        assert results[0] == ("1.32", "1.33", "identical", [])
+        assert results[1] == ("1.33", "1.34", "identical", [])
+
+    def test_different_shas_without_pymupdf(self):
+        """When SHAs differ but PyMuPDF is missing, status is 'changed-no-detail'."""
+        shas = {
+            "1.31": ("aaa", "old-versions/CKA_Curriculum_v1.31.pdf"),
+            "1.32": ("bbb", "CKA_Curriculum_v1.32.pdf"),
+        }
+        with patch.object(tracker, "get_curriculum_shas", return_value=shas), \
+             patch.object(tracker, "HAS_FITZ", False):
+            results, _ = tracker.diff_curricula("CKA", ["1.31", "1.32"])
+        assert results[0][2] == "changed-no-detail"
+
+    def test_missing_sha_is_unavailable(self):
+        """If a version's SHA can't be fetched, report 'unavailable'."""
+        shas = {"1.31": ("aaa", "old-versions/CKA_Curriculum_v1.31.pdf")}
+        with patch.object(tracker, "get_curriculum_shas", return_value=shas):
+            results, _ = tracker.diff_curricula("CKA", ["1.31", "1.32"])
+        assert results[0][2] == "unavailable"
+
+    def test_count_changes(self):
+        diff_lines = ["--- a", "+++ b", "@@ -1 +1 @@", "-old", "+new", " context"]
+        assert tracker._count_changes(diff_lines) == 2
+
+    def test_extract_topic_changes(self):
+        diff_lines = [
+            "--- v1.32", "+++ v1.33", "@@ -1 +1 @@",
+            "-• Kuztomize", "+• Kustomize",
+        ]
+        added, removed = tracker._extract_topic_changes(diff_lines)
+        assert removed == ["Kuztomize"]
+        assert added == ["Kustomize"]
+
+    def test_footnotes_markers_in_table_order(self):
+        """Footnote numbers follow table row order (top to bottom)."""
+        diffs = [
+            ("1.31", "1.32", "changed-no-detail", []),
+            ("1.32", "1.33", "changed-no-detail", []),
+        ]
+        file_info = {
+            "1.31": ("a", "old-versions/CKA_Curriculum_v1.31.pdf"),
+            "1.32": ("b", "CKA_Curriculum_v1.32.pdf"),
+            "1.33": ("c", "CKA_Curriculum_v1.33.pdf"),
+        }
+        row_order = ["1.36", "1.35", "1.34", "1.33", "1.32", "1.31", "1.30", "1.29"]
+        markers, footnotes, n = tracker.build_topic_footnotes("CKA", diffs, file_info, row_order)
+        assert markers["1.33"] == "¹"  # appears first in table
+        assert markers["1.32"] == "²"  # appears second
+        assert len(footnotes) == 2
+        assert footnotes[0].startswith("¹")
+        assert footnotes[1].startswith("²")
+        assert n == 2
+
+    def test_footnotes_global_numbering(self):
+        """Footnote numbers continue from start parameter for global numbering."""
+        diffs = [("1.31", "1.32", "changed-no-detail", [])]
+        file_info = {
+            "1.31": ("a", "old-versions/CKAD_Curriculum_v1.31.pdf"),
+            "1.32": ("b", "CKAD_Curriculum_v1.32.pdf"),
+        }
+        row_order = ["1.32"]
+        markers, footnotes, n = tracker.build_topic_footnotes("CKAD", diffs, file_info, row_order, start=2)
+        assert markers["1.32"] == "³"  # third superscript (0-indexed: ¹²³)
+        assert footnotes[0].startswith("³")
+        assert n == 3
+
+    def test_footnotes_major_shows_links(self):
+        """Major changes show PDF links in footnotes."""
+        diffs = [("1.31", "1.32", "changed", [f"+line{i}" for i in range(20)])]
+        file_info = {
+            "1.31": ("a", "old-versions/CKA_Curriculum_v1.31.pdf"),
+            "1.32": ("b", "CKA_Curriculum_v1.32.pdf"),
+        }
+        row_order = ["1.32"]
+        markers, footnotes, _ = tracker.build_topic_footnotes("CKA", diffs, file_info, row_order)
+        assert "1.32" in markers
+        assert "github.com" in footnotes[0]
+        assert "v1.31 curriculum" in footnotes[0]
+
+    def test_footnotes_small_inline(self):
+        """Small changes show compact inline text in a single footnote line."""
+        diffs = [("1.32", "1.33", "changed", [
+            "--- v1.32", "+++ v1.33", "@@ -1 +1 @@",
+            "-• Kuztomize", "+• Kustomize",
+        ])]
+        file_info = {
+            "1.32": ("a", "CKAD_Curriculum_v1.32.pdf"),
+            "1.33": ("b", "CKAD_Curriculum_v1.33.pdf"),
+        }
+        row_order = ["1.33"]
+        markers, footnotes, _ = tracker.build_topic_footnotes("CKAD", diffs, file_info, row_order)
+        assert "1.33" in markers
+        assert "Removed: Kuztomize" in footnotes[0]
+        assert "Added: Kustomize" in footnotes[0]
+        assert len(footnotes) == 1
+
+    def test_footnotes_skip_identical(self):
+        """Identical pairs get no markers."""
+        diffs = [("1.33", "1.34", "identical", [])]
+        row_order = ["1.34"]
+        markers, footnotes, n = tracker.build_topic_footnotes("CKA", diffs, {}, row_order)
+        assert markers == {}
+        assert footnotes == []
+        assert n == 0
+
+    def test_footnotes_skip_unavailable(self):
+        """Unavailable pairs get no markers."""
+        diffs = [("1.29", "1.30", "unavailable", [])]
+        row_order = ["1.30"]
+        markers, footnotes, n = tracker.build_topic_footnotes("CKA", diffs, {}, row_order)
+        assert markers == {}
+        assert footnotes == []
+        assert n == 0
+
+    def test_footnotes_changed_no_detail_shows_links(self):
+        """changed-no-detail (no PyMuPDF) still shows PDF links."""
+        diffs = [("1.31", "1.32", "changed-no-detail", [])]
+        file_info = {
+            "1.31": ("aaa", "old-versions/CKA_Curriculum_v1.31.pdf"),
+            "1.32": ("bbb", "CKA_Curriculum_v1.32.pdf"),
+        }
+        row_order = ["1.32"]
+        markers, footnotes, _ = tracker.build_topic_footnotes("CKA", diffs, file_info, row_order)
+        assert "github.com" in footnotes[0]
+
+    def test_format_diff_output_detailed(self):
+        """--diff format shows full diff in code blocks."""
+        diff_lines = ["--- v1.31", "+++ v1.32", "@@ -1 +1 @@", "-old", "+new"]
+        diffs = [("1.31", "1.32", "changed", diff_lines)]
+        lines = tracker.format_diff_output("CKA", diffs)
+        text = "\n".join(lines)
+        assert "```diff" in text
+        assert "-old" in text
+        assert "+new" in text
+
+    def test_format_diff_output_changed_no_detail(self):
+        """--diff format renders changed-no-detail like unavailable."""
+        diffs = [("1.31", "1.32", "changed-no-detail", [])]
+        lines = tracker.format_diff_output("CKA", diffs)
+        text = "\n".join(lines)
+        assert "*PDF not available*" in text
+
+    def test_br_after_legend_when_footnotes_exist(self):
+        """Legend line gets <br> when footnotes follow."""
+        tracker._errors.clear()
+
+        def mock_cert_switch(cert, minor):
+            return {"1.35": date(2026, 3, 3), "1.34": date(2025, 10, 28)}.get(minor)
+
+        def mock_diff(cert, versions):
+            if cert == "CKA":
+                return [("1.31", "1.32", "changed-no-detail", [])], {
+                    "1.31": ("a", "old-versions/CKA_Curriculum_v1.31.pdf"),
+                    "1.32": ("b", "CKA_Curriculum_v1.32.pdf"),
+                }
+            return [], {}
+
+        with patch.object(tracker, "released_versions", return_value=SAMPLE_ENDOFLIFE), \
+             patch.object(tracker, "cert_switch_date", side_effect=mock_cert_switch), \
+             patch.object(tracker, "next_release_date", return_value=date(2026, 4, 22)), \
+             patch.object(tracker, "diff_curricula", side_effect=mock_diff):
+            output, code = tracker.generate(today=date(2026, 3, 17))
+
+        # CKA has a footnote → legend should end with <br>
+        lines = output.split("\n")
+        for i, line in enumerate(lines):
+            if line.startswith("~ Predicted:") and line.endswith("<br>"):
+                # Next line should be a footnote
+                assert lines[i + 1].startswith("¹"), f"Expected footnote after legend<br>, got: {lines[i + 1]}"
+                break
+        else:
+            pytest.fail("No legend line with <br> found in output")
+
+    def test_no_br_when_no_footnotes(self):
+        """Legend line has no <br> when there are no footnotes."""
+        tracker._errors.clear()
+
+        def mock_cert_switch(cert, minor):
+            return {"1.35": date(2026, 3, 3), "1.34": date(2025, 10, 28)}.get(minor)
+
+        with patch.object(tracker, "released_versions", return_value=SAMPLE_ENDOFLIFE), \
+             patch.object(tracker, "cert_switch_date", side_effect=mock_cert_switch), \
+             patch.object(tracker, "next_release_date", return_value=date(2026, 4, 22)), \
+             patch.object(tracker, "diff_curricula", return_value=([], {})):
+            output, code = tracker.generate(today=date(2026, 3, 17))
+
+        for line in output.split("\n"):
+            if line.startswith("~ Predicted:"):
+                assert not line.endswith("<br>"), f"Legend should not have <br> without footnotes: {line}"
+
+    def test_br_between_multiple_footnotes(self):
+        """Non-final footnotes get <br>, last footnote does not."""
+        tracker._errors.clear()
+
+        def mock_cert_switch(cert, minor):
+            return {"1.35": date(2026, 3, 3), "1.34": date(2025, 10, 28)}.get(minor)
+
+        def mock_diff(cert, versions):
+            if cert == "CKA":
+                return [
+                    ("1.31", "1.32", "changed-no-detail", []),
+                    ("1.32", "1.33", "changed-no-detail", []),
+                ], {
+                    "1.31": ("a", "old-versions/CKA_Curriculum_v1.31.pdf"),
+                    "1.32": ("b", "CKA_Curriculum_v1.32.pdf"),
+                    "1.33": ("c", "CKA_Curriculum_v1.33.pdf"),
+                }
+            return [], {}
+
+        with patch.object(tracker, "released_versions", return_value=SAMPLE_ENDOFLIFE), \
+             patch.object(tracker, "cert_switch_date", side_effect=mock_cert_switch), \
+             patch.object(tracker, "next_release_date", return_value=date(2026, 4, 22)), \
+             patch.object(tracker, "diff_curricula", side_effect=mock_diff):
+            output, code = tracker.generate(today=date(2026, 3, 17))
+
+        lines = output.split("\n")
+        # Find the CKA footnotes (¹ and ²)
+        fn_lines = [l for l in lines if l.startswith("¹") or l.startswith("²")]
+        assert len(fn_lines) == 2, f"Expected 2 CKA footnotes, got {fn_lines}"
+        assert fn_lines[0].endswith("<br>"), "First footnote should end with <br>"
+        assert not fn_lines[1].endswith("<br>"), "Last footnote should not end with <br>"
+
+
+# --- Intent 3: Schema validation catches bad data ---
+
+class TestIntent3Validation:
     """Schema validation detects API changes early."""
 
     def test_valid_endoflife_response(self):
@@ -151,9 +422,9 @@ class TestIntent2Validation:
             tracker.validate_commits("not a list")
 
 
-# --- Intent 2: Exit codes for workflow ---
+# --- Intent 3: Exit codes for workflow ---
 
-class TestIntent2ExitCodes:
+class TestIntent3ExitCodes:
     """Script exits with correct codes so the workflow knows what to do."""
 
     def test_exit_2_when_no_versions(self):
@@ -169,13 +440,13 @@ class TestIntent2ExitCodes:
         tracker._errors.clear()
 
         def mock_cert_switch(cert, minor):
-            # Return plausible dates for each cert+version
             base = {"1.35": date(2026, 3, 3), "1.34": date(2025, 10, 28)}.get(minor)
             return base
 
         with patch.object(tracker, "released_versions", return_value=SAMPLE_ENDOFLIFE), \
              patch.object(tracker, "cert_switch_date", side_effect=mock_cert_switch), \
-             patch.object(tracker, "next_release_date", return_value=date(2026, 4, 22)):
+             patch.object(tracker, "next_release_date", return_value=date(2026, 4, 22)), \
+             patch.object(tracker, "diff_curricula", return_value=([], {})):
             output, code = tracker.generate(today=date(2026, 3, 17))
 
         assert code == 0
@@ -183,6 +454,7 @@ class TestIntent2ExitCodes:
         assert "### CKA" in output
         assert "### CKAD" in output
         assert "### CKS" in output
+        assert "EOL" in output  # global footer
 
 
 # --- Pure function tests ---
@@ -213,6 +485,37 @@ class TestPureFunctions:
         assert tracker._parse_ordinal_date("22nd April 2026") == date(2026, 4, 22)
         assert tracker._parse_ordinal_date("1st January 2025") == date(2025, 1, 1)
         assert tracker._parse_ordinal_date("3rd March 2026") == date(2026, 3, 3)
+
+    def test_filter_outliers_normal_data(self):
+        """Normal data passes through unchanged."""
+        recent = [64, 71, 76, 63]
+        reference = [64, 71, 76, 63, 55, 62]
+        assert tracker.filter_outliers(recent, reference) == [64, 71, 76, 63]
+
+    def test_filter_outliers_removes_extreme(self):
+        """A value beyond μ+2σ of the reference set is excluded."""
+        # reference: μ=65.2, σ=6.7, upper=78.6
+        reference = [64, 71, 76, 63, 55, 62]
+        recent = [95, 64, 71, 76]
+        filtered = tracker.filter_outliers(recent, reference)
+        assert 95 not in filtered
+        assert filtered == [64, 71, 76]
+
+    def test_filter_outliers_too_few_reference(self):
+        """With < 3 reference points, no filtering occurs."""
+        assert tracker.filter_outliers([90, 60], [90, 60]) == [90, 60]
+
+    def test_filter_outliers_all_identical(self):
+        """Zero std → no filtering."""
+        assert tracker.filter_outliers([50, 50], [50, 50, 50]) == [50, 50]
+
+    def test_filter_outliers_fallback_if_all_removed(self):
+        """If filtering would remove everything, return original."""
+        # All values are outliers relative to a very different reference
+        recent = [200, 210]
+        reference = [50, 51, 52, 53, 54, 55]  # upper bound ~59
+        result = tracker.filter_outliers(recent, reference)
+        assert result == [200, 210]
 
 
 # --- Tactic D: Fallback parsers ---
