@@ -28,7 +28,7 @@
 | 1.29 | 2023-12-13* | 2024-01-30  | Tue  |   48 |
 
 ~ Predicted: K8s GA + 62d avg (last 4), nearest Tue<br>
-² v1.32 → v1.33 topics changed: Removed: Kuztomize · Added: Kustomize<br>
+² v1.32 → v1.33 topics changed: [v1.32 curriculum](https://github.com/cncf/curriculum/blob/master/old-versions/CKAD_Curriculum_v1.32.pdf) · [v1.33 curriculum](https://github.com/cncf/curriculum/blob/master/old-versions/CKAD_Curriculum_v1.33.pdf)<br>
 ³ v1.31 → v1.32 topics changed: [v1.31 curriculum](https://github.com/cncf/curriculum/blob/master/old-versions/CKAD_Curriculum_v1.31.pdf) · [v1.32 curriculum](https://github.com/cncf/curriculum/blob/master/old-versions/CKAD_Curriculum_v1.32.pdf)
 
 ### CKS
@@ -36,7 +36,7 @@
 | K8s  | K8s GA      | CKS Switch  | Day  | Days | Overdue|
 |:-----|:------------|:------------|:----:|:----:|:------:|
 | 1.36 | ~2026-04-22 | ~2026-06-30 | ~Tue |  ~69 |        |
-| 1.35 | 2025-12-17  | ~2026-02-24 | ~Tue |  ~69 | ~22   |
+| 1.35 | 2025-12-17  | ~2026-02-24 | ~Tue |  ~69 | ~23   |
 | 1.34 | 2025-08-27  | 2025-10-30  | Thu  |   64 |        |
 | 1.33 | 2025-04-23  | 2025-07-03 ⁴| Thu  |   71 |        |
 | 1.32 | 2024-12-11* | 2025-02-25  | Tue  |   76 |        |
@@ -55,4 +55,3 @@
 [![Python](https://img.shields.io/badge/python-3.9+-3776AB?style=for-the-badge&logo=python&logoColor=white)](https://www.python.org)
 [![License](https://img.shields.io/github/license/smartbit/cka-ckad-cks-release-tracker?style=for-the-badge)](LICENSE)
 [![GitHub stars](https://img.shields.io/github/stars/smartbit/cka-ckad-cks-release-tracker?style=for-the-badge&logo=github&color=181717)](https://github.com/smartbit/cka-ckad-cks-release-tracker)
-
