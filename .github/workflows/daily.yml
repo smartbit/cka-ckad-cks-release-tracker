@@ -16,6 +16,9 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
+      - name: Install PyMuPDF
+        run: pip install --quiet PyMuPDF
+
       - name: Run tracker
         id: run
         run: |
