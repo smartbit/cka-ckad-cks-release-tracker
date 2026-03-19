@@ -8,7 +8,7 @@ on:
 permissions:
   contents: write
   issues: write
-  administration: write  # needed for gh repo archive
+  # administration: write — needed for gh repo archive, unavailable on public repos
 
 jobs:
   update:
