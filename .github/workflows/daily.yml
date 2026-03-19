@@ -8,7 +8,7 @@ on:
 permissions:
   contents: write
   issues: write
-  # administration: write — needed for gh repo archive, unavailable on public repos
+  # ARCHIVE_PAT secret provides administration:write for making repo private after 30 days of failure
 
 jobs:
   update:
@@ -91,7 +91,7 @@ jobs:
           - Check the [workflow run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})
           - See [RECOVERY.md](RECOVERY.md) for recovery procedures
 
-          If this issue remains open for 30+ days, the repo will be auto-archived.
+          If this issue remains open for 30+ days, the repo will be made private.
           EOF
           )"
           else
@@ -107,8 +107,9 @@ jobs:
             days=$(( (now_epoch - created_epoch) / 86400 ))
             if [ "$days" -ge 30 ]; then
               gh issue comment "$issue_num" \
-                --body "Failure persisted for ${days} days. Archiving repository. See RECOVERY.md to restore."
-              gh repo archive --yes
+                --body "Failure persisted for ${days} days. Making repository private. See RECOVERY.md to restore."
+              GH_TOKEN="${{ secrets.ARCHIVE_PAT }}" \
+                gh repo edit --visibility private --accept-visibility-change-consequences
             fi
           fi
         env:
