@@ -12,7 +12,8 @@ import re
 import sys
 from datetime import date, timedelta
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
+from urllib.error import URLError
 
 import pytest
 
@@ -23,6 +24,9 @@ _spec = importlib.util.spec_from_file_location(
 )
 tracker = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(tracker)
+
+# Save reference before autouse fixture replaces it
+_real_fetch_faq_versions = tracker.fetch_faq_versions
 
 
 # --- Fixtures ---
@@ -40,6 +44,13 @@ SAMPLE_ENDOFLIFE = [
 SAMPLE_SIG_README = """
 | **v1.36.0 released**  | Branch Manager | Wednesday 22nd April 2026  | week 15  |
 """
+
+
+@pytest.fixture(autouse=True)
+def _no_faq_fetch():
+    """Prevent FAQ HTTP calls in tests unless explicitly overridden."""
+    with patch.object(tracker, "fetch_faq_versions", return_value=None):
+        yield
 
 
 # --- Intent 1: Output shows predictions ---
@@ -568,6 +579,143 @@ class TestIntent3TrackerJson:
         assert data["CKS"]["version_in_1w"] == "1.35"
         assert data["CKS"]["version_in_2w"] == "1.35"
         assert data["CKS"]["version_in_1m"] == "1.35"
+
+
+# --- Tactic E: FAQ cross-validation ---
+
+class TestTacticEFaqValidation:
+    """Linux Foundation FAQ page validates current cert versions."""
+
+    def test_fetch_faq_versions_parses_html(self):
+        """Parses cert versions from FAQ HTML."""
+        html = (b'<p>The CKA exam environment is currently running Kubernetes v1.35</p>'
+                b'<p>The CKAD exam environment is currently running Kubernetes v1.35</p>'
+                b'<p>The CKS exam environment is currently running Kubernetes v1.34</p>')
+        mock_resp = Mock()
+        mock_resp.read.return_value = html
+        mock_resp.__enter__ = Mock(return_value=mock_resp)
+        mock_resp.__exit__ = Mock(return_value=False)
+
+        with patch.object(tracker, "urlopen", return_value=mock_resp):
+            result = _real_fetch_faq_versions()
+
+        assert result == {"CKA": "1.35", "CKAD": "1.35", "CKS": "1.34"}
+
+    def test_fetch_faq_versions_returns_none_on_failure(self):
+        """Returns None when FAQ page cannot be fetched."""
+        with patch.object(tracker, "urlopen", side_effect=URLError("timeout")):
+            result = _real_fetch_faq_versions()
+        assert result is None
+
+    def test_faq_overrides_tracker_when_newer(self):
+        """FAQ version overrides tracker_data when FAQ is newer."""
+        tracker._errors.clear()
+
+        def mock_cert_switch(cert, minor):
+            # CKS only has 1.34 switch (no 1.35 curriculum commit)
+            if cert == "CKS":
+                return {"1.34": date(2025, 10, 28)}.get(minor)
+            return {"1.35": date(2026, 3, 3), "1.34": date(2025, 10, 28)}.get(minor)
+
+        # FAQ says CKS is on 1.35 — overrides commit-based 1.34
+        faq = {"CKA": "1.35", "CKAD": "1.35", "CKS": "1.35"}
+
+        with patch.object(tracker, "released_versions", return_value=SAMPLE_ENDOFLIFE), \
+             patch.object(tracker, "cert_switch_date", side_effect=mock_cert_switch), \
+             patch.object(tracker, "next_release_date", return_value=date(2026, 4, 22)), \
+             patch.object(tracker, "diff_curricula", return_value=([], {})), \
+             patch.object(tracker, "fetch_faq_versions", return_value=faq):
+            _, _, data = tracker.generate(today=date(2026, 3, 17))
+
+        assert data["CKS"]["version"] == "1.35"
+        assert data["CKS"]["overdue"] is False
+        assert data["CKS"]["topics_changed"] is False
+
+    def test_faq_override_updates_version_in_fields(self):
+        """FAQ override also updates version_in_* if they were lower."""
+        tracker._errors.clear()
+
+        def mock_cert_switch(cert, minor):
+            if cert == "CKS":
+                return {"1.34": date(2025, 10, 28)}.get(minor)
+            return {"1.35": date(2026, 3, 3), "1.34": date(2025, 10, 28)}.get(minor)
+
+        faq = {"CKA": "1.35", "CKAD": "1.35", "CKS": "1.35"}
+
+        with patch.object(tracker, "released_versions", return_value=SAMPLE_ENDOFLIFE), \
+             patch.object(tracker, "cert_switch_date", side_effect=mock_cert_switch), \
+             patch.object(tracker, "next_release_date", return_value=date(2026, 4, 22)), \
+             patch.object(tracker, "diff_curricula", return_value=([], {})), \
+             patch.object(tracker, "fetch_faq_versions", return_value=faq):
+            _, _, data = tracker.generate(today=date(2026, 3, 17))
+
+        assert data["CKS"]["version_in_1w"] == "1.35"
+        assert data["CKS"]["version_in_2w"] == "1.35"
+        assert data["CKS"]["version_in_1m"] == "1.35"
+
+    def test_faq_mismatch_logs_error(self):
+        """FAQ override logs an error (bumps exit code to 1)."""
+        tracker._errors.clear()
+
+        def mock_cert_switch(cert, minor):
+            if cert == "CKS":
+                return {"1.34": date(2025, 10, 28)}.get(minor)
+            return {"1.35": date(2026, 3, 3), "1.34": date(2025, 10, 28)}.get(minor)
+
+        faq = {"CKA": "1.35", "CKAD": "1.35", "CKS": "1.35"}
+
+        with patch.object(tracker, "released_versions", return_value=SAMPLE_ENDOFLIFE), \
+             patch.object(tracker, "cert_switch_date", side_effect=mock_cert_switch), \
+             patch.object(tracker, "next_release_date", return_value=date(2026, 4, 22)), \
+             patch.object(tracker, "diff_curricula", return_value=([], {})), \
+             patch.object(tracker, "fetch_faq_versions", return_value=faq):
+            _, code, _ = tracker.generate(today=date(2026, 3, 17))
+
+        assert code == 1
+        assert any("faq-override-CKS" in e["source"] for e in tracker._errors)
+
+    def test_faq_no_override_when_matching(self):
+        """No error logged when FAQ versions match tracker versions."""
+        tracker._errors.clear()
+
+        def mock_cert_switch(cert, minor):
+            return {"1.35": date(2026, 3, 3), "1.34": date(2025, 10, 28)}.get(minor)
+
+        faq = {"CKA": "1.35", "CKAD": "1.35", "CKS": "1.35"}
+
+        with patch.object(tracker, "released_versions", return_value=SAMPLE_ENDOFLIFE), \
+             patch.object(tracker, "cert_switch_date", side_effect=mock_cert_switch), \
+             patch.object(tracker, "next_release_date", return_value=date(2026, 4, 22)), \
+             patch.object(tracker, "diff_curricula", return_value=([], {})), \
+             patch.object(tracker, "fetch_faq_versions", return_value=faq):
+            _, code, _ = tracker.generate(today=date(2026, 3, 17))
+
+        assert code == 0
+        assert not any("faq" in e["source"] for e in tracker._errors)
+
+    def test_faq_failure_does_not_break(self):
+        """FAQ fetch failure doesn't affect normal operation."""
+        tracker._errors.clear()
+
+        def mock_cert_switch(cert, minor):
+            return {"1.35": date(2026, 3, 3), "1.34": date(2025, 10, 28)}.get(minor)
+
+        with patch.object(tracker, "released_versions", return_value=SAMPLE_ENDOFLIFE), \
+             patch.object(tracker, "cert_switch_date", side_effect=mock_cert_switch), \
+             patch.object(tracker, "next_release_date", return_value=date(2026, 4, 22)), \
+             patch.object(tracker, "diff_curricula", return_value=([], {})), \
+             patch.object(tracker, "fetch_faq_versions", return_value=None):
+            output, code, data = tracker.generate(today=date(2026, 3, 17))
+
+        assert code == 0
+        assert output is not None
+        assert data["CKA"]["version"] == "1.35"
+
+    def test_version_key_comparison(self):
+        """_version_key produces correct sort order."""
+        assert tracker._version_key("1.35") > tracker._version_key("1.34")
+        assert tracker._version_key("1.35") == tracker._version_key("1.35")
+        assert tracker._version_key("2.0") > tracker._version_key("1.99")
 
 
 # --- Intent 4: Schema validation catches bad data ---

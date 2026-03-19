@@ -12,6 +12,9 @@ Data sources (with fallbacks — Tactic D):
   - GitHub API (cncf/curriculum) by path   → fallback: list repo contents + regex match
   - GitHub API (kubernetes/sig-release)    → fallback: bullet format, then estimation
 
+Cross-validation (Tactic E):
+  - Linux Foundation FAQ page              → validates current cert versions in tracker.json
+
 Schema validation (Tactic C):
   - Validates API responses before use
   - Collects errors, reports to stderr
@@ -39,6 +42,7 @@ CURRICULUM_COMMITS = f"{CURRICULUM_REPO}/commits"
 CURRICULUM_CONTENTS = f"{CURRICULUM_REPO}/contents/"
 K8S_RELEASES = "https://api.github.com/repos/kubernetes/kubernetes/releases?per_page=100"
 SIG_RELEASE_README = "https://api.github.com/repos/kubernetes/sig-release/contents/releases/release-{}/README.md"
+LF_FAQ_URL = "https://docs.linuxfoundation.org/tc-docs/certification/faq-cka-ckad-cks"
 UA = "cka-ckad-cks-release-tracker/1.0"
 
 CERTS = ("CKA", "CKAD", "CKS")
@@ -245,6 +249,39 @@ def _parse_ordinal_date(raw):
     """Parse '22nd April 2026' into a date object."""
     cleaned = re.sub(r"(st|nd|rd|th)", "", raw)
     return datetime.strptime(cleaned, "%d %B %Y").date()
+
+
+# --- Cross-validation (Tactic E) ---
+
+def _version_key(v):
+    """Convert version string to sortable tuple for comparison."""
+    return tuple(int(x) for x in v.split("."))
+
+
+def fetch_faq_versions():
+    """Fetch current exam versions from Linux Foundation FAQ page (Tactic E).
+
+    Parses the FAQ page for patterns like:
+        "CKA exam environment is currently running Kubernetes v1.35"
+
+    Returns {cert: version_str} or None on failure.
+    """
+    try:
+        req = Request(LF_FAQ_URL, headers={"User-Agent": UA})
+        with urlopen(req, timeout=30) as resp:
+            html = resp.read().decode()
+    except Exception:
+        return None
+
+    text = re.sub(r'<[^>]+>', ' ', html)
+    versions = {}
+    for cert in CERTS:
+        m = re.search(
+            rf'The\s+{cert}\s+exam\s+environment\s+is\s+currently\s+'
+            rf'running\s+Kubernetes\s+v(\d+\.\d+)', text)
+        if m:
+            versions[cert] = m.group(1)
+    return versions if versions else None
 
 
 # --- Prediction ---
@@ -723,6 +760,31 @@ def generate(today=None):
     if certs_with_data == 0:
         log_error("output", "No actual cert switch data found for any cert")
         return None, 2, None
+
+    # Tactic E: validate tracker_data against Linux Foundation FAQ
+    faq_versions = fetch_faq_versions()
+    if faq_versions:
+        for cert in CERTS:
+            if cert not in faq_versions or cert not in tracker_data:
+                continue
+            faq_ver = faq_versions[cert]
+            tracker_ver = tracker_data[cert].get("version")
+            if not tracker_ver or faq_ver == tracker_ver:
+                continue
+            if _version_key(faq_ver) > _version_key(tracker_ver):
+                log_error(f"faq-override-{cert}",
+                          f"FAQ says v{faq_ver} but commits show v{tracker_ver}; "
+                          f"using FAQ version with today as switch date")
+                tracker_data[cert]["version"] = faq_ver
+                tracker_data[cert]["topics_changed"] = False
+                tracker_data[cert]["overdue"] = False
+                for key in ("version_in_1w", "version_in_2w", "version_in_1m"):
+                    if _version_key(tracker_data[cert].get(key, "0.0")) < _version_key(faq_ver):
+                        tracker_data[cert][key] = faq_ver
+            else:
+                log_error(f"faq-mismatch-{cert}",
+                          f"Commits show v{tracker_ver} but FAQ says v{faq_ver}; "
+                          f"possible pre-staging")
 
     lines.append("\\* EOL (end of life)")
     lines.append("")
