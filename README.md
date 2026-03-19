@@ -28,7 +28,7 @@
 | 1.29 | 2023-12-13* | 2024-01-30  | Tue  |   48 |
 
 ~ Predicted: K8s GA + 62d avg (last 4), nearest Tue<br>
-² v1.32 → v1.33 topics changed: [v1.32 curriculum](https://github.com/cncf/curriculum/blob/master/old-versions/CKAD_Curriculum_v1.32.pdf) · [v1.33 curriculum](https://github.com/cncf/curriculum/blob/master/old-versions/CKAD_Curriculum_v1.33.pdf)<br>
+² v1.32 → v1.33 topics changed: Removed: Kuztomize · Added: Kustomize<br>
 ³ v1.31 → v1.32 topics changed: [v1.31 curriculum](https://github.com/cncf/curriculum/blob/master/old-versions/CKAD_Curriculum_v1.31.pdf) · [v1.32 curriculum](https://github.com/cncf/curriculum/blob/master/old-versions/CKAD_Curriculum_v1.32.pdf)
 
 ### CKS
