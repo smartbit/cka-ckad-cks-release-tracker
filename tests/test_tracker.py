@@ -46,6 +46,28 @@ SAMPLE_SIG_README = """
 """
 
 
+def _switch(d, commit_count=1, last_updated=None, commit_dates=None, commit_shas=None):
+    """Create a cert_switch_date return dict for testing."""
+    lu = last_updated or d
+    if commit_dates is None:
+        if commit_count == 1:
+            commit_dates = [d]
+            commit_shas = ["aaa"]
+        else:
+            commit_dates = [lu, d]
+            commit_shas = ["bbb", "aaa"]
+    return {
+        "switch_date": d,
+        "last_updated": lu,
+        "commit_count": commit_count,
+        "filename": "test.pdf",
+        "first_sha": commit_shas[-1],
+        "latest_sha": commit_shas[0],
+        "commit_dates": commit_dates,
+        "commit_shas": commit_shas,
+    }
+
+
 @pytest.fixture(autouse=True)
 def _no_faq_fetch():
     """Prevent FAQ HTTP calls in tests unless explicitly overridden."""
@@ -323,7 +345,8 @@ class TestIntent2TopicChanges:
         tracker._errors.clear()
 
         def mock_cert_switch(cert, minor):
-            return {"1.35": date(2026, 3, 3), "1.34": date(2025, 10, 28)}.get(minor)
+            dates = {"1.35": date(2026, 3, 3), "1.34": date(2025, 10, 28)}
+            return _switch(dates[minor]) if minor in dates else None
 
         def mock_diff(cert, versions):
             if cert == "CKA":
@@ -354,7 +377,8 @@ class TestIntent2TopicChanges:
         tracker._errors.clear()
 
         def mock_cert_switch(cert, minor):
-            return {"1.35": date(2026, 3, 3), "1.34": date(2025, 10, 28)}.get(minor)
+            dates = {"1.35": date(2026, 3, 3), "1.34": date(2025, 10, 28)}
+            return _switch(dates[minor]) if minor in dates else None
 
         with patch.object(tracker, "released_versions", return_value=SAMPLE_ENDOFLIFE), \
              patch.object(tracker, "cert_switch_date", side_effect=mock_cert_switch), \
@@ -371,7 +395,8 @@ class TestIntent2TopicChanges:
         tracker._errors.clear()
 
         def mock_cert_switch(cert, minor):
-            return {"1.35": date(2026, 3, 3), "1.34": date(2025, 10, 28)}.get(minor)
+            dates = {"1.35": date(2026, 3, 3), "1.34": date(2025, 10, 28)}
+            return _switch(dates[minor]) if minor in dates else None
 
         def mock_diff(cert, versions):
             if cert == "CKA":
@@ -399,6 +424,333 @@ class TestIntent2TopicChanges:
         assert not fn_lines[1].endswith("<br>"), "Last footnote should not end with <br>"
 
 
+# --- Intent 2: Mid-version curriculum revisions ---
+
+class TestMidVersionRevision:
+    """Detect mid-version curriculum updates."""
+
+    def test_filter_removes_file_moves(self):
+        """Commits matching another version's switch date are filtered out."""
+        # v1.29 has 2 commits: file move (2024-05-28) and initial (2024-02-06)
+        # v1.30 switch_date is 2024-05-28 → the file move matches
+        info_29 = {
+            "switch_date": date(2024, 2, 6),
+            "last_updated": date(2024, 5, 28),
+            "commit_count": 2,
+            "filename": "CKA_Curriculum_v1.29.pdf",
+            "first_sha": "aaa",
+            "latest_sha": "bbb",
+            "commit_dates": [date(2024, 5, 28), date(2024, 2, 6)],
+            "commit_shas": ["bbb", "aaa"],
+        }
+        switch_dates = {date(2024, 5, 28), date(2024, 2, 6)}  # v1.30 and v1.29
+        result = tracker._filter_revision_info({"1.29": info_29}, switch_dates)
+        assert "1.29" not in result
+
+    def test_filter_keeps_genuine_revision(self):
+        """Real mid-version revisions survive filtering."""
+        # v1.32 has 3 commits: file move (2025-07-03), revision (2025-04-08),
+        # initial (2025-02-25). v1.33 switch_date is 2025-07-03.
+        info_32 = {
+            "switch_date": date(2025, 2, 25),
+            "last_updated": date(2025, 7, 3),
+            "commit_count": 3,
+            "filename": "CKS_Curriculum v1.32.pdf",
+            "first_sha": "aaa",
+            "latest_sha": "ccc",
+            "commit_dates": [date(2025, 7, 3), date(2025, 4, 8), date(2025, 2, 25)],
+            "commit_shas": ["ccc", "bbb", "aaa"],
+        }
+        switch_dates = {date(2025, 7, 3), date(2025, 2, 25)}
+        result = tracker._filter_revision_info({"1.32": info_32}, switch_dates)
+        assert "1.32" in result
+        # last_updated/latest_sha should point to the revision, not the file move
+        assert result["1.32"]["last_updated"] == date(2025, 4, 8)
+        assert result["1.32"]["latest_sha"] == "bbb"
+
+    def test_detection_from_commit_count(self):
+        """commit_count > 1 in tracker.json means the PDF was updated after initial publish."""
+        tracker._errors.clear()
+
+        def mock_cert_switch(cert, minor):
+            dates = {"1.35": date(2026, 3, 3), "1.34": date(2025, 10, 28)}
+            if minor not in dates:
+                return None
+            # CKS 1.35 was revised (current version, no later switch to filter)
+            if cert == "CKS" and minor == "1.35":
+                return _switch(dates[minor], commit_count=3,
+                               last_updated=date(2026, 5, 10))
+            return _switch(dates[minor])
+
+        with patch.object(tracker, "released_versions", return_value=SAMPLE_ENDOFLIFE), \
+             patch.object(tracker, "cert_switch_date", side_effect=mock_cert_switch), \
+             patch.object(tracker, "next_release_date", return_value=date(2026, 4, 22)), \
+             patch.object(tracker, "diff_curricula", return_value=([], {})):
+            _, _, data = tracker.generate(today=date(2026, 3, 17))
+
+        assert data["CKS"]["curriculum_revised"] is True
+        assert data["CKS"]["revision_date"] == "2026-05-10"
+        assert data["CKA"]["curriculum_revised"] is False
+        assert data["CKA"]["revision_date"] is None
+
+    def test_no_revision_when_single_commit(self):
+        """commit_count == 1 means no revision."""
+        tracker._errors.clear()
+
+        def mock_cert_switch(cert, minor):
+            dates = {"1.35": date(2026, 3, 3), "1.34": date(2025, 10, 28)}
+            return _switch(dates[minor]) if minor in dates else None
+
+        with patch.object(tracker, "released_versions", return_value=SAMPLE_ENDOFLIFE), \
+             patch.object(tracker, "cert_switch_date", side_effect=mock_cert_switch), \
+             patch.object(tracker, "next_release_date", return_value=date(2026, 4, 22)), \
+             patch.object(tracker, "diff_curricula", return_value=([], {})):
+            _, _, data = tracker.generate(today=date(2026, 3, 17))
+
+        for cert in ("CKA", "CKAD", "CKS"):
+            assert data[cert]["curriculum_revised"] is False
+            assert data[cert]["revision_date"] is None
+
+    def test_file_move_not_flagged_as_revision(self):
+        """A version with commit_count=2 where the 2nd commit is a file move
+        should not be flagged as revised."""
+        tracker._errors.clear()
+
+        def mock_cert_switch(cert, minor):
+            dates = {"1.35": date(2026, 3, 3), "1.34": date(2025, 10, 28)}
+            if minor not in dates:
+                return None
+            # v1.34 has 2 commits: file move on v1.35's switch date, and initial
+            if minor == "1.34":
+                return _switch(
+                    dates[minor], commit_count=2,
+                    last_updated=date(2026, 3, 3),  # matches v1.35 switch
+                    commit_dates=[date(2026, 3, 3), date(2025, 10, 28)],
+                    commit_shas=["bbb", "aaa"])
+            return _switch(dates[minor])
+
+        with patch.object(tracker, "released_versions", return_value=SAMPLE_ENDOFLIFE), \
+             patch.object(tracker, "cert_switch_date", side_effect=mock_cert_switch), \
+             patch.object(tracker, "next_release_date", return_value=date(2026, 4, 22)), \
+             patch.object(tracker, "diff_curricula", return_value=([], {})):
+            _, _, data = tracker.generate(today=date(2026, 3, 17))
+
+        # v1.34 file move should be filtered out, not a revision
+        assert data["CKA"]["curriculum_revised"] is False
+
+    def test_revision_footnote_without_pymupdf(self):
+        """Revised version gets a footnote with links when detail unavailable."""
+        revision_info = {
+            "1.32": {
+                "switch_date": date(2025, 2, 25),
+                "last_updated": date(2025, 4, 8),
+                "commit_count": 2,
+                "filename": "CKS_Curriculum v1.32.pdf",
+                "first_sha": "aaa",
+                "latest_sha": "bbb",
+                "commit_dates": [date(2025, 4, 8), date(2025, 2, 25)],
+                "commit_shas": ["bbb", "aaa"],
+            }
+        }
+        diffs = []
+        file_info = {}
+        row_order = ["1.33", "1.32", "1.31"]
+
+        with patch.object(tracker, "_diff_revision", return_value=None):
+            markers, footnotes, n = tracker.build_topic_footnotes(
+                "CKS", diffs, file_info, row_order, revision_info=revision_info)
+
+        assert "1.32" in markers
+        assert len(footnotes) == 1
+        assert "revised" in footnotes[0]
+        assert "2025-04-08" in footnotes[0]
+        assert "[initial]" in footnotes[0]
+        assert "[revised]" in footnotes[0]
+        assert "aaa" in footnotes[0]  # first_sha in initial link
+        assert "bbb" in footnotes[0]  # latest_sha in revised link
+        assert n == 1
+
+    def test_revision_footnote_with_detail(self):
+        """When PyMuPDF can diff, show what changed."""
+        revision_info = {
+            "1.32": {
+                "switch_date": date(2025, 2, 25),
+                "last_updated": date(2025, 4, 8),
+                "commit_count": 2,
+                "filename": "CKS_Curriculum v1.32.pdf",
+                "first_sha": "aaa",
+                "latest_sha": "bbb",
+                "commit_dates": [date(2025, 4, 8), date(2025, 2, 25)],
+                "commit_shas": ["bbb", "aaa"],
+            }
+        }
+        diffs = []
+        file_info = {}
+        row_order = ["1.32"]
+
+        with patch.object(tracker, "_diff_revision",
+                         return_value="Added: Istio alongside Cilium"):
+            markers, footnotes, _ = tracker.build_topic_footnotes(
+                "CKS", diffs, file_info, row_order, revision_info=revision_info)
+
+        assert "Added: Istio alongside Cilium" in footnotes[0]
+        assert "2025-04-08" in footnotes[0]
+
+    def test_revision_marker_appended_to_topic_change_marker(self):
+        """A version with both cross-version change and revision gets both markers."""
+        diffs = [("1.31", "1.32", "changed-no-detail", [])]
+        file_info = {
+            "1.31": ("a", "old-versions/CKS_Curriculum_v1.31.pdf"),
+            "1.32": ("b", "CKS_Curriculum v1.32.pdf"),
+        }
+        revision_info = {
+            "1.32": {
+                "switch_date": date(2025, 2, 25),
+                "last_updated": date(2025, 4, 8),
+                "commit_count": 2,
+                "filename": "CKS_Curriculum v1.32.pdf",
+                "first_sha": "aaa",
+                "latest_sha": "bbb",
+                "commit_dates": [date(2025, 4, 8), date(2025, 2, 25)],
+                "commit_shas": ["bbb", "aaa"],
+            }
+        }
+        row_order = ["1.32"]
+
+        with patch.object(tracker, "_diff_revision", return_value=None):
+            markers, footnotes, n = tracker.build_topic_footnotes(
+                "CKS", diffs, file_info, row_order, revision_info=revision_info)
+
+        # Two footnotes: cross-version (¹) and revision (²)
+        assert markers["1.32"] == "¹²"
+        assert len(footnotes) == 2
+        assert footnotes[0].startswith("¹")
+        assert footnotes[1].startswith("²")
+        assert "revised" in footnotes[1]
+        assert n == 2
+
+    def test_revision_only_flags_current_version_in_tracker(self):
+        """Only the current version gets curriculum_revised in tracker.json."""
+        tracker._errors.clear()
+
+        def mock_cert_switch(cert, minor):
+            dates = {"1.35": date(2026, 3, 3), "1.34": date(2025, 10, 28)}
+            if minor not in dates:
+                return None
+            # 1.35 was revised (current version, no later switch to filter)
+            if minor == "1.35":
+                return _switch(dates[minor], commit_count=3,
+                               last_updated=date(2026, 5, 10))
+            return _switch(dates[minor])
+
+        with patch.object(tracker, "released_versions", return_value=SAMPLE_ENDOFLIFE), \
+             patch.object(tracker, "cert_switch_date", side_effect=mock_cert_switch), \
+             patch.object(tracker, "next_release_date", return_value=date(2026, 4, 22)), \
+             patch.object(tracker, "diff_curricula", return_value=([], {})):
+            _, _, data = tracker.generate(today=date(2026, 3, 17))
+
+        # Current version is 1.35 — it's revised
+        assert data["CKA"]["curriculum_revised"] is True
+        assert data["CKA"]["revision_date"] == "2026-05-10"
+
+    def test_faq_override_resets_revision(self):
+        """FAQ override clears curriculum_revised."""
+        tracker._errors.clear()
+
+        def mock_cert_switch(cert, minor):
+            if cert == "CKS":
+                dates = {"1.34": date(2025, 10, 28)}
+                if minor not in dates:
+                    return None
+                return _switch(dates[minor], commit_count=2,
+                               last_updated=date(2025, 12, 1))
+            dates = {"1.35": date(2026, 3, 3), "1.34": date(2025, 10, 28)}
+            return _switch(dates[minor]) if minor in dates else None
+
+        faq = {"CKA": "1.35", "CKAD": "1.35", "CKS": "1.35"}
+
+        with patch.object(tracker, "released_versions", return_value=SAMPLE_ENDOFLIFE), \
+             patch.object(tracker, "cert_switch_date", side_effect=mock_cert_switch), \
+             patch.object(tracker, "next_release_date", return_value=date(2026, 4, 22)), \
+             patch.object(tracker, "diff_curricula", return_value=([], {})), \
+             patch.object(tracker, "fetch_faq_versions", return_value=faq):
+            _, _, data = tracker.generate(today=date(2026, 3, 17))
+
+        # CKS was overridden to 1.35 by FAQ — revision cleared
+        assert data["CKS"]["curriculum_revised"] is False
+        assert data["CKS"]["revision_date"] is None
+
+    def test_normalize_topics_extracts_bullets(self):
+        """Extracts bullet-point topics from PDF text."""
+        lines = ["Section Header", "• First topic", "• Second topic"]
+        topics = tracker._normalize_topics(lines)
+        assert topics == {"First topic", "Second topic"}
+
+    def test_normalize_topics_strips_boilerplate(self):
+        """Boilerplate text is not joined to the last topic."""
+        lines = [
+            "• Last real topic",
+            "Cloud native computing uses an open source software stack",
+        ]
+        topics = tracker._normalize_topics(lines)
+        assert topics == {"Last real topic"}
+
+    def test_normalize_topics_strips_section_headers(self):
+        """Section percentage headers are not joined to topics."""
+        lines = [
+            "• Use Ingress rules to expose applications",
+            "25% - Application Environment, Configuration and Security",
+            "• Next topic in different section",
+        ]
+        topics = tracker._normalize_topics(lines)
+        assert "Use Ingress rules to expose applications" in topics
+        assert "Next topic in different section" in topics
+        assert len(topics) == 2
+
+    def test_normalize_topics_fixes_ligatures(self):
+        """PDF ligatures are replaced with plain ASCII."""
+        lines = ["• Certi\ufb01cation exam"]  # ﬁ ligature
+        topics = tracker._normalize_topics(lines)
+        assert topics == {"Certification exam"}
+
+    def test_normalize_topics_joins_continuation(self):
+        """Continuation lines are joined to the previous bullet."""
+        lines = [
+            "• Implement Pod-to-Pod encryption",
+            "using Cilium",
+            "• Next topic",
+        ]
+        topics = tracker._normalize_topics(lines)
+        assert "Implement Pod-to-Pod encryption using Cilium" in topics
+        assert "Next topic" in topics
+
+    def test_diff_revision_uses_set_comparison(self):
+        """Set-based comparison surfaces real topic changes through reformatting noise."""
+        old_lines = [
+            "Section", "• Implement Pod-to-Pod encryption using Cilium",
+            "• Use Kubernetes audit logs",
+        ]
+        new_lines = [
+            "Reformatted Section", "• Implement Pod-to-Pod encryption (Cilium, Istio)",
+            "• Use Kubernetes audit logs",
+        ]
+        info = {
+            "filename": "CKS_Curriculum v1.32.pdf",
+            "first_sha": "aaa", "latest_sha": "bbb",
+        }
+
+        with patch.object(tracker, "HAS_FITZ", True), \
+             patch.object(tracker, "download_pdf_at_sha",
+                         side_effect=["old.pdf", "new.pdf"]), \
+             patch.object(tracker, "extract_pdf_text",
+                         side_effect=[old_lines, new_lines]), \
+             patch("os.unlink"):
+            result = tracker._diff_revision(info)
+
+        assert "Removed: Implement Pod-to-Pod encryption using Cilium" in result
+        assert "Added: Implement Pod-to-Pod encryption (Cilium, Istio)" in result
+
+
 # --- Intent 3: Machine-readable output for downstream automation ---
 
 class TestIntent3TrackerJson:
@@ -409,7 +761,8 @@ class TestIntent3TrackerJson:
         tracker._errors.clear()
 
         def mock_cert_switch(cert, minor):
-            return {"1.35": date(2026, 3, 3), "1.34": date(2025, 10, 28)}.get(minor)
+            dates = {"1.35": date(2026, 3, 3), "1.34": date(2025, 10, 28)}
+            return _switch(dates[minor]) if minor in dates else None
 
         with patch.object(tracker, "released_versions", return_value=SAMPLE_ENDOFLIFE), \
              patch.object(tracker, "cert_switch_date", side_effect=mock_cert_switch), \
@@ -426,7 +779,8 @@ class TestIntent3TrackerJson:
         tracker._errors.clear()
 
         def mock_cert_switch(cert, minor):
-            return {"1.35": date(2026, 3, 3), "1.34": date(2025, 10, 28)}.get(minor)
+            dates = {"1.35": date(2026, 3, 3), "1.34": date(2025, 10, 28)}
+            return _switch(dates[minor]) if minor in dates else None
 
         with patch.object(tracker, "released_versions", return_value=SAMPLE_ENDOFLIFE), \
              patch.object(tracker, "cert_switch_date", side_effect=mock_cert_switch), \
@@ -443,7 +797,8 @@ class TestIntent3TrackerJson:
         tracker._errors.clear()
 
         def mock_cert_switch(cert, minor):
-            return {"1.35": date(2026, 3, 3), "1.34": date(2025, 10, 28)}.get(minor)
+            dates = {"1.35": date(2026, 3, 3), "1.34": date(2025, 10, 28)}
+            return _switch(dates[minor]) if minor in dates else None
 
         def mock_diff(cert, versions):
             if cert == "CKA":
@@ -467,7 +822,8 @@ class TestIntent3TrackerJson:
         tracker._errors.clear()
 
         def mock_cert_switch(cert, minor):
-            return {"1.35": date(2026, 3, 3), "1.34": date(2025, 10, 28)}.get(minor)
+            dates = {"1.35": date(2026, 3, 3), "1.34": date(2025, 10, 28)}
+            return _switch(dates[minor]) if minor in dates else None
 
         with patch.object(tracker, "released_versions", return_value=SAMPLE_ENDOFLIFE), \
              patch.object(tracker, "cert_switch_date", side_effect=mock_cert_switch), \
@@ -490,7 +846,8 @@ class TestIntent3TrackerJson:
         tracker._errors.clear()
 
         def mock_cert_switch(cert, minor):
-            return {"1.35": date(2026, 3, 3), "1.34": date(2025, 10, 28)}.get(minor)
+            dates = {"1.35": date(2026, 3, 3), "1.34": date(2025, 10, 28)}
+            return _switch(dates[minor]) if minor in dates else None
 
         with patch.object(tracker, "released_versions", return_value=SAMPLE_ENDOFLIFE), \
              patch.object(tracker, "cert_switch_date", side_effect=mock_cert_switch), \
@@ -501,6 +858,8 @@ class TestIntent3TrackerJson:
         for cert in ("CKA", "CKAD", "CKS"):
             assert isinstance(data[cert]["version"], str)
             assert isinstance(data[cert]["topics_changed"], bool)
+            assert isinstance(data[cert]["curriculum_revised"], bool)
+            assert data[cert]["revision_date"] is None  # no revisions in this test
             assert isinstance(data[cert]["overdue"], bool)
             assert isinstance(data[cert]["version_in_1w"], str)
             assert isinstance(data[cert]["version_in_2w"], str)
@@ -511,7 +870,8 @@ class TestIntent3TrackerJson:
         tracker._errors.clear()
 
         def mock_cert_switch(cert, minor):
-            return {"1.35": date(2026, 3, 3), "1.34": date(2025, 10, 28)}.get(minor)
+            dates = {"1.35": date(2026, 3, 3), "1.34": date(2025, 10, 28)}
+            return _switch(dates[minor]) if minor in dates else None
 
         with patch.object(tracker, "released_versions", return_value=SAMPLE_ENDOFLIFE), \
              patch.object(tracker, "cert_switch_date", side_effect=mock_cert_switch), \
@@ -527,10 +887,11 @@ class TestIntent3TrackerJson:
         tracker._errors.clear()
 
         def mock_cert_switch(cert, minor):
-            # CKS has no 1.35 switch → prediction will be in the past
             if cert == "CKS":
-                return {"1.34": date(2025, 10, 28)}.get(minor)
-            return {"1.35": date(2026, 3, 3), "1.34": date(2025, 10, 28)}.get(minor)
+                dates = {"1.34": date(2025, 10, 28)}
+            else:
+                dates = {"1.35": date(2026, 3, 3), "1.34": date(2025, 10, 28)}
+            return _switch(dates[minor]) if minor in dates else None
 
         with patch.object(tracker, "released_versions", return_value=SAMPLE_ENDOFLIFE), \
              patch.object(tracker, "cert_switch_date", side_effect=mock_cert_switch), \
@@ -547,7 +908,8 @@ class TestIntent3TrackerJson:
         tracker._errors.clear()
 
         def mock_cert_switch(cert, minor):
-            return {"1.35": date(2026, 3, 3), "1.34": date(2025, 10, 28)}.get(minor)
+            dates = {"1.35": date(2026, 3, 3), "1.34": date(2025, 10, 28)}
+            return _switch(dates[minor]) if minor in dates else None
 
         with patch.object(tracker, "released_versions", return_value=SAMPLE_ENDOFLIFE), \
              patch.object(tracker, "cert_switch_date", side_effect=mock_cert_switch), \
@@ -566,8 +928,10 @@ class TestIntent3TrackerJson:
 
         def mock_cert_switch(cert, minor):
             if cert == "CKS":
-                return {"1.34": date(2025, 10, 28)}.get(minor)
-            return {"1.35": date(2026, 3, 3), "1.34": date(2025, 10, 28)}.get(minor)
+                dates = {"1.34": date(2025, 10, 28)}
+            else:
+                dates = {"1.35": date(2026, 3, 3), "1.34": date(2025, 10, 28)}
+            return _switch(dates[minor]) if minor in dates else None
 
         with patch.object(tracker, "released_versions", return_value=SAMPLE_ENDOFLIFE), \
              patch.object(tracker, "cert_switch_date", side_effect=mock_cert_switch), \
@@ -612,10 +976,11 @@ class TestTacticEFaqValidation:
         tracker._errors.clear()
 
         def mock_cert_switch(cert, minor):
-            # CKS only has 1.34 switch (no 1.35 curriculum commit)
             if cert == "CKS":
-                return {"1.34": date(2025, 10, 28)}.get(minor)
-            return {"1.35": date(2026, 3, 3), "1.34": date(2025, 10, 28)}.get(minor)
+                dates = {"1.34": date(2025, 10, 28)}
+            else:
+                dates = {"1.35": date(2026, 3, 3), "1.34": date(2025, 10, 28)}
+            return _switch(dates[minor]) if minor in dates else None
 
         # FAQ says CKS is on 1.35 — overrides commit-based 1.34
         faq = {"CKA": "1.35", "CKAD": "1.35", "CKS": "1.35"}
@@ -637,8 +1002,10 @@ class TestTacticEFaqValidation:
 
         def mock_cert_switch(cert, minor):
             if cert == "CKS":
-                return {"1.34": date(2025, 10, 28)}.get(minor)
-            return {"1.35": date(2026, 3, 3), "1.34": date(2025, 10, 28)}.get(minor)
+                dates = {"1.34": date(2025, 10, 28)}
+            else:
+                dates = {"1.35": date(2026, 3, 3), "1.34": date(2025, 10, 28)}
+            return _switch(dates[minor]) if minor in dates else None
 
         faq = {"CKA": "1.35", "CKAD": "1.35", "CKS": "1.35"}
 
@@ -659,8 +1026,10 @@ class TestTacticEFaqValidation:
 
         def mock_cert_switch(cert, minor):
             if cert == "CKS":
-                return {"1.34": date(2025, 10, 28)}.get(minor)
-            return {"1.35": date(2026, 3, 3), "1.34": date(2025, 10, 28)}.get(minor)
+                dates = {"1.34": date(2025, 10, 28)}
+            else:
+                dates = {"1.35": date(2026, 3, 3), "1.34": date(2025, 10, 28)}
+            return _switch(dates[minor]) if minor in dates else None
 
         faq = {"CKA": "1.35", "CKAD": "1.35", "CKS": "1.35"}
 
@@ -679,7 +1048,8 @@ class TestTacticEFaqValidation:
         tracker._errors.clear()
 
         def mock_cert_switch(cert, minor):
-            return {"1.35": date(2026, 3, 3), "1.34": date(2025, 10, 28)}.get(minor)
+            dates = {"1.35": date(2026, 3, 3), "1.34": date(2025, 10, 28)}
+            return _switch(dates[minor]) if minor in dates else None
 
         faq = {"CKA": "1.35", "CKAD": "1.35", "CKS": "1.35"}
 
@@ -698,7 +1068,8 @@ class TestTacticEFaqValidation:
         tracker._errors.clear()
 
         def mock_cert_switch(cert, minor):
-            return {"1.35": date(2026, 3, 3), "1.34": date(2025, 10, 28)}.get(minor)
+            dates = {"1.35": date(2026, 3, 3), "1.34": date(2025, 10, 28)}
+            return _switch(dates[minor]) if minor in dates else None
 
         with patch.object(tracker, "released_versions", return_value=SAMPLE_ENDOFLIFE), \
              patch.object(tracker, "cert_switch_date", side_effect=mock_cert_switch), \
@@ -772,8 +1143,8 @@ class TestIntent4ExitCodes:
         tracker._errors.clear()
 
         def mock_cert_switch(cert, minor):
-            base = {"1.35": date(2026, 3, 3), "1.34": date(2025, 10, 28)}.get(minor)
-            return base
+            dates = {"1.35": date(2026, 3, 3), "1.34": date(2025, 10, 28)}
+            return _switch(dates[minor]) if minor in dates else None
 
         with patch.object(tracker, "released_versions", return_value=SAMPLE_ENDOFLIFE), \
              patch.object(tracker, "cert_switch_date", side_effect=mock_cert_switch), \
@@ -876,7 +1247,7 @@ class TestTacticDFallbacks:
     def test_cert_switch_falls_back_to_contents_listing(self):
         """When pattern-based lookup fails, contents listing is tried."""
         contents = [{"name": "CKA_Curriculum_v1.35.pdf"}]
-        commits = [{"commit": {"committer": {"date": "2026-03-03T18:12:56Z"}}}]
+        commits = [{"commit": {"committer": {"date": "2026-03-03T18:12:56Z"}}, "sha": "abc123"}]
 
         def mock_fetch(url):
             if "contents" in url:
@@ -887,4 +1258,114 @@ class TestTacticDFallbacks:
              patch.object(tracker, "fetch_json", side_effect=mock_fetch):
             result = tracker.cert_switch_date("CKA", "1.35")
 
-        assert result == date(2026, 3, 3)
+        assert result["switch_date"] == date(2026, 3, 3)
+        assert result["commit_count"] == 1
+
+
+# --- SHA-keyed diff cache ---
+
+@pytest.fixture(autouse=True)
+def _fresh_diff_cache():
+    """Isolate every test from the repo's diff-cache.json and from each other."""
+    tracker._diff_cache = {"pairs": {}, "revisions": {}}
+    tracker._diff_cache_dirty = False
+    yield
+    tracker._diff_cache = None
+    tracker._diff_cache_dirty = False
+
+
+class TestDiffCache:
+    """PDF diff results are cached by immutable SHA pairs across runs."""
+
+    SHAS = {
+        "1.31": ("aaa", "old-versions/CKA_Curriculum_v1.31.pdf"),
+        "1.32": ("bbb", "CKA_Curriculum_v1.32.pdf"),
+    }
+
+    def test_pair_cache_hit_skips_download(self):
+        tracker._diff_cache["pairs"]["aaa:bbb"] = {
+            "status": "changed", "diff_lines": ["-• Old", "+• New"],
+        }
+        with patch.object(tracker, "get_curriculum_shas", return_value=self.SHAS), \
+             patch.object(tracker, "download_pdf") as mock_dl:
+            results, _ = tracker.diff_curricula("CKA", ["1.31", "1.32"])
+        mock_dl.assert_not_called()
+        assert results[0] == ("1.31", "1.32", "changed", ["-• Old", "+• New"])
+
+    def test_pair_cache_populated_on_compute(self):
+        with patch.object(tracker, "get_curriculum_shas", return_value=self.SHAS), \
+             patch.object(tracker, "download_pdf", return_value="/dev/null"), \
+             patch.object(tracker, "extract_pdf_text", side_effect=[["• Old"], ["• New"]]), \
+             patch.object(tracker, "HAS_FITZ", True), \
+             patch("os.unlink"):
+            results, _ = tracker.diff_curricula("CKA", ["1.31", "1.32"])
+        assert results[0][2] == "changed"
+        cached = tracker._diff_cache["pairs"]["aaa:bbb"]
+        assert cached["status"] == "changed"
+        assert cached["diff_lines"] == results[0][3]
+        assert tracker._diff_cache_dirty
+
+    def test_pair_download_failure_not_cached(self):
+        """Transient failures must be retried next run, not cached."""
+        with patch.object(tracker, "get_curriculum_shas", return_value=self.SHAS), \
+             patch.object(tracker, "download_pdf", return_value=None), \
+             patch.object(tracker, "HAS_FITZ", True):
+            results, _ = tracker.diff_curricula("CKA", ["1.31", "1.32"])
+        assert results[0][2] == "changed-no-detail"
+        assert tracker._diff_cache["pairs"] == {}
+        assert not tracker._diff_cache_dirty
+
+    def test_revision_cache_hit_skips_download(self):
+        tracker._diff_cache["revisions"]["first:latest"] = "Added: Istio"
+        info = {"first_sha": "first", "latest_sha": "latest", "filename": "x.pdf"}
+        with patch.object(tracker, "download_pdf_at_sha") as mock_dl:
+            assert tracker._diff_revision(info) == "Added: Istio"
+        mock_dl.assert_not_called()
+
+    def test_revision_cached_none_is_a_hit(self):
+        """A cached 'no topic changes' result must not trigger a recompute."""
+        tracker._diff_cache["revisions"]["first:latest"] = None
+        info = {"first_sha": "first", "latest_sha": "latest", "filename": "x.pdf"}
+        with patch.object(tracker, "download_pdf_at_sha") as mock_dl:
+            assert tracker._diff_revision(info) is None
+        mock_dl.assert_not_called()
+
+    def test_revision_cache_populated_on_compute(self):
+        info = {"first_sha": "first", "latest_sha": "latest", "filename": "x.pdf"}
+        with patch.object(tracker, "download_pdf_at_sha", return_value="/dev/null"), \
+             patch.object(tracker, "extract_pdf_text",
+                          side_effect=[["• Cilium"], ["• Cilium", "• Istio"]]), \
+             patch.object(tracker, "HAS_FITZ", True), \
+             patch("os.unlink"):
+            detail = tracker._diff_revision(info)
+        assert detail == "Added: Istio"
+        assert tracker._diff_cache["revisions"]["first:latest"] == "Added: Istio"
+
+    def test_save_and_reload_roundtrip(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(tracker, "DIFF_CACHE_FILE", str(tmp_path / "diff-cache.json"))
+        tracker._cache_pair("aaa", "bbb", "changed", ["+• New"])
+        tracker._cache_revision("first", "latest", None)
+        tracker.save_diff_cache()
+
+        tracker._diff_cache = None
+        cache = tracker._load_diff_cache()
+        assert cache["pairs"]["aaa:bbb"] == {"status": "changed", "diff_lines": ["+• New"]}
+        assert cache["revisions"]["first:latest"] is None
+
+    def test_save_skipped_when_clean(self, tmp_path, monkeypatch):
+        cache_file = tmp_path / "diff-cache.json"
+        monkeypatch.setattr(tracker, "DIFF_CACHE_FILE", str(cache_file))
+        tracker.save_diff_cache()
+        assert not cache_file.exists()
+
+    def test_corrupt_cache_file_starts_fresh(self, tmp_path, monkeypatch):
+        cache_file = tmp_path / "diff-cache.json"
+        cache_file.write_text("{not json")
+        monkeypatch.setattr(tracker, "DIFF_CACHE_FILE", str(cache_file))
+        tracker._diff_cache = None
+        assert tracker._load_diff_cache() == {"pairs": {}, "revisions": {}}
+
+    def test_missing_cache_file_starts_fresh(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(tracker, "DIFF_CACHE_FILE", str(tmp_path / "nope.json"))
+        tracker._diff_cache = None
+        assert tracker._load_diff_cache() == {"pairs": {}, "revisions": {}}

@@ -20,6 +20,10 @@ Schema validation (Tactic C):
   - Collects errors, reports to stderr
   - Exit codes: 0=ok, 1=degraded, 2=critical failure
 
+Caching:
+  - diff-cache.json stores PDF diff results keyed by immutable git blob/commit
+    SHAs, so entries never go stale; committed by CI alongside tracker.json
+
 Requires: python 3.9+, gh CLI (optional, used for authenticated GitHub API).
 Optional: pymupdf (for detailed topic change extraction).
 """
@@ -169,8 +173,23 @@ def _released_versions_from_github():
     return result
 
 
+def _parse_commit_dates(commits):
+    """Extract dates and SHAs from a commits list (newest first)."""
+    dates = []
+    shas = []
+    for c in commits:
+        ts = c["commit"]["committer"]["date"]
+        dates.append(datetime.fromisoformat(ts.replace("Z", "+00:00")).date())
+        shas.append(c["sha"])
+    return dates, shas
+
+
 def cert_switch_date(cert, minor):
-    """Get cert switch date. Primary: commits by filename. Fallback: list contents + regex."""
+    """Get cert switch info. Primary: commits by filename. Fallback: list contents + regex.
+
+    Returns dict with switch_date, last_updated, commit_count, filename,
+    first_sha, latest_sha, commit_dates, commit_shas — or None.
+    """
     # Primary: try known filename patterns
     result = _cert_switch_from_patterns(cert, minor)
     if result:
@@ -186,7 +205,11 @@ def cert_switch_date(cert, minor):
 
 
 def _cert_switch_from_patterns(cert, minor):
-    """Try known filename patterns to find the cert switch commit."""
+    """Try known filename patterns to find the cert switch commit.
+
+    Returns dict with switch_date, last_updated, commit_count, filename,
+    first_sha, latest_sha, commit_dates, commit_shas — or None.
+    """
     for pattern in CERT_FILE_PATTERNS[cert]:
         filename = pattern.format(v=minor)
         url = f"{CURRICULUM_COMMITS}?path={quote(filename)}"
@@ -194,15 +217,28 @@ def _cert_switch_from_patterns(cert, minor):
             commits = fetch_json(url)
             if commits:
                 validate_commits(commits)
-                ts = commits[-1]["commit"]["committer"]["date"]
-                return datetime.fromisoformat(ts.replace("Z", "+00:00")).date()
+                dates, shas = _parse_commit_dates(commits)
+                return {
+                    "switch_date": dates[-1],
+                    "last_updated": dates[0],
+                    "commit_count": len(commits),
+                    "filename": filename,
+                    "first_sha": shas[-1],
+                    "latest_sha": shas[0],
+                    "commit_dates": dates,
+                    "commit_shas": shas,
+                }
         except (URLError, KeyError, IndexError, ValueError):
             continue
     return None
 
 
 def _cert_switch_from_contents(cert, minor):
-    """Fallback: list repo contents, find file by regex, get its first commit."""
+    """Fallback: list repo contents, find file by regex, get its first commit.
+
+    Returns dict with switch_date, last_updated, commit_count, filename,
+    first_sha, latest_sha, commit_dates, commit_shas — or None.
+    """
     contents = fetch_json(CURRICULUM_CONTENTS)
     if not isinstance(contents, list):
         return None
@@ -215,8 +251,17 @@ def _cert_switch_from_contents(cert, minor):
             commits = fetch_json(url)
             if commits:
                 validate_commits(commits)
-                ts = commits[-1]["commit"]["committer"]["date"]
-                return datetime.fromisoformat(ts.replace("Z", "+00:00")).date()
+                dates, shas = _parse_commit_dates(commits)
+                return {
+                    "switch_date": dates[-1],
+                    "last_updated": dates[0],
+                    "commit_count": len(commits),
+                    "filename": name,
+                    "first_sha": shas[-1],
+                    "latest_sha": shas[0],
+                    "commit_dates": dates,
+                    "commit_shas": shas,
+                }
     return None
 
 
@@ -247,8 +292,13 @@ def next_release_date(minor):
 
 def _parse_ordinal_date(raw):
     """Parse '22nd April 2026' into a date object."""
-    cleaned = re.sub(r"(st|nd|rd|th)", "", raw)
-    return datetime.strptime(cleaned, "%d %B %Y").date()
+    # Anchor to the digit so month names keep their letters ("August" contains "st")
+    cleaned = re.sub(r"(?<=\d)(st|nd|rd|th)\b", "", raw)
+    try:
+        return datetime.strptime(cleaned, "%d %B %Y").date()
+    except ValueError as e:
+        log_error("ordinal-date-parse", e)
+        return None
 
 
 # --- Cross-validation (Tactic E) ---
@@ -326,17 +376,48 @@ def filter_outliers(recent, reference, sigma=OUTLIER_SIGMA):
 
 # --- Table building ---
 
+def _filter_revision_info(revision_info, switch_dates_set):
+    """Remove false-positive revisions caused by file moves.
+
+    When CNCF publishes a new version, the old file is moved to
+    old-versions/, creating an extra commit. These commits have dates
+    matching another version's switch_date and should be excluded.
+
+    Returns filtered revision_info with updated last_updated/latest_sha
+    pointing to the most recent genuine revision commit.
+    """
+    filtered = {}
+    for ver, info in revision_info.items():
+        # Intermediate dates = all commit dates except the initial publish
+        intermediate = list(zip(info["commit_dates"][:-1],
+                                info["commit_shas"][:-1]))
+        # Keep only dates that don't match any version's switch date
+        real = [(d, s) for d, s in intermediate if d not in switch_dates_set]
+        if real:
+            info = dict(info)
+            info["last_updated"] = real[0][0]
+            info["latest_sha"] = real[0][1]
+            filtered[ver] = info
+    return filtered
+
+
 def build_cert_data(cert, all_versions, next_minor, next_ga, today):
     """Collect switch dates and compute predictions for one cert.
 
-    Returns (rows, avg_lag, day_name) where each row is:
+    Returns (rows, avg_lag, day_name, revision_info) where each row is:
         (minor, ga, switch, supported, ga_predicted, sw_predicted)
+    and revision_info is {version: switch_info_dict} for versions with
+    genuine mid-version curriculum revisions (file moves excluded).
     """
     hist = []
+    raw_revision_info = {}
     for v in all_versions[:HISTORICAL]:
         minor = v["cycle"]
         ga = date.fromisoformat(v["releaseDate"])
-        switch = cert_switch_date(cert, minor)
+        info = cert_switch_date(cert, minor)
+        switch = info["switch_date"] if info else None
+        if info and info["commit_count"] > 1:
+            raw_revision_info[minor] = info
         eol = date.fromisoformat(v["eol"]) if isinstance(v["eol"], str) else None
         supported = eol is None or eol > today
         hist.append((minor, ga, switch, supported))
@@ -348,7 +429,10 @@ def build_cert_data(cert, all_versions, next_minor, next_ga, today):
     all_switch_dates = [sw for _, sw in pairs_with_data]
 
     # Next version
-    next_switch = cert_switch_date(cert, next_minor)
+    next_info = cert_switch_date(cert, next_minor)
+    next_switch = next_info["switch_date"] if next_info else None
+    if next_info and next_info["commit_count"] > 1:
+        raw_revision_info[next_minor] = next_info
     rows = []
     sw_predicted = False
     if not next_switch and next_ga and deltas:
@@ -364,6 +448,12 @@ def build_cert_data(cert, all_versions, next_minor, next_ga, today):
             sw_predicted = True
         rows.append((minor, ga, switch, supported, False, sw_predicted))
 
+    # Filter out false-positive revisions from file moves
+    switch_dates_set = {sw for _, _, sw, _ in hist if sw}
+    if next_info:
+        switch_dates_set.add(next_info["switch_date"])
+    revision_info = _filter_revision_info(raw_revision_info, switch_dates_set)
+
     avg_lag = round(sum(deltas) / len(deltas)) if deltas else 0
     day_name = ""
     if all_switch_dates:
@@ -371,7 +461,7 @@ def build_cert_data(cert, all_versions, next_minor, next_ga, today):
         common_day = weekdays.most_common(1)[0][0]
         day_name = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"][common_day]
 
-    return rows, avg_lag, day_name
+    return rows, avg_lag, day_name, revision_info
 
 
 def format_table(cert, rows, avg_lag, day_name, today, markers=None):
@@ -445,6 +535,65 @@ except ImportError:
     HAS_FITZ = False
 
 
+# --- SHA-keyed diff cache ---
+#
+# PDF downloads and text diffs are the expensive part of a run, yet their
+# inputs are addressed by git blob/commit SHAs and therefore immutable: the
+# same SHA pair always diffs to the same result. Caching by SHA pair never
+# goes stale and needs no invalidation. Only definitive results are cached;
+# transient failures (download errors, missing PyMuPDF) are retried next run.
+
+DIFF_CACHE_FILE = "diff-cache.json"
+
+_diff_cache = None
+_diff_cache_dirty = False
+
+
+def _load_diff_cache():
+    """Load the diff cache from disk (lazily, once). Returns the cache dict."""
+    global _diff_cache
+    if _diff_cache is None:
+        try:
+            with open(DIFF_CACHE_FILE) as f:
+                data = json.load(f)
+        except (OSError, ValueError):
+            data = {}
+        if not isinstance(data, dict):
+            data = {}
+        pairs = data.get("pairs")
+        revisions = data.get("revisions")
+        _diff_cache = {
+            "pairs": pairs if isinstance(pairs, dict) else {},
+            "revisions": revisions if isinstance(revisions, dict) else {},
+        }
+    return _diff_cache
+
+
+def _cache_pair(old_sha, new_sha, status, diff_lines):
+    """Store a cross-version diff result keyed by its blob SHA pair."""
+    global _diff_cache_dirty
+    _load_diff_cache()["pairs"][f"{old_sha}:{new_sha}"] = {
+        "status": status,
+        "diff_lines": diff_lines,
+    }
+    _diff_cache_dirty = True
+
+
+def _cache_revision(first_sha, latest_sha, detail):
+    """Store a mid-version revision diff summary keyed by its commit SHA pair."""
+    global _diff_cache_dirty
+    _load_diff_cache()["revisions"][f"{first_sha}:{latest_sha}"] = detail
+    _diff_cache_dirty = True
+
+
+def save_diff_cache():
+    """Write the diff cache to disk if it gained entries this run."""
+    if _diff_cache_dirty:
+        with open(DIFF_CACHE_FILE, "w") as f:
+            json.dump(_diff_cache, f, indent=2)
+            f.write("\n")
+
+
 def get_curriculum_shas(cert):
     """Get blob SHAs and repo paths for all curriculum versions of a cert.
     Returns {version: (sha, repo_path)}.
@@ -498,6 +647,23 @@ def download_pdf(cert, version):
     return None
 
 
+def download_pdf_at_sha(filename, sha):
+    """Download a curriculum PDF at a specific commit SHA. Returns path or None."""
+    import tempfile
+    url = f"https://raw.githubusercontent.com/cncf/curriculum/{sha}/{quote(filename)}"
+    try:
+        req = Request(url, headers={"User-Agent": UA})
+        with urlopen(req, timeout=30) as resp:
+            if resp.status == 200:
+                tmp = tempfile.NamedTemporaryFile(suffix=".pdf", delete=False)
+                tmp.write(resp.read())
+                tmp.close()
+                return tmp.name
+    except Exception:
+        pass
+    return None
+
+
 def extract_pdf_text(path):
     """Extract text from a PDF using PyMuPDF. Returns list of lines."""
     doc = fitz.open(path)
@@ -540,7 +706,14 @@ def diff_curricula(cert, versions):
             results.append((old_ver, new_ver, "unavailable", []))
             continue
 
-        # SHAs differ — try Method 2: download + PyMuPDF text diff
+        # SHAs differ — cached result from an earlier run?
+        cached = _load_diff_cache()["pairs"].get(f"{old_entry[0]}:{new_entry[0]}")
+        if cached is not None:
+            results.append((old_ver, new_ver,
+                            cached["status"], cached.get("diff_lines", [])))
+            continue
+
+        # Not cached — try Method 2: download + PyMuPDF text diff
         if not HAS_FITZ:
             results.append((old_ver, new_ver, "changed-no-detail", []))
             continue
@@ -564,6 +737,7 @@ def diff_curricula(cert, versions):
                 lineterm="",
             ))
             status = "changed" if diff else "identical"
+            _cache_pair(old_entry[0], new_entry[0], status, diff)
             results.append((old_ver, new_ver, status, diff))
         except Exception as e:
             results.append((old_ver, new_ver, "changed-no-detail", [str(e)]))
@@ -596,6 +770,100 @@ def _extract_topic_changes(diff_lines):
     return added, removed
 
 
+_BOILERPLATE_RE = re.compile(
+    r'Cloud native computing|https?://|©|[Cc]opyright|'
+    r'Important Instructions|Linux Foundation|'
+    r'These Certification Exam|Curriculum|'
+    r'\d+\s*%\s*-|Certified Kubernetes',
+    re.I
+)
+
+
+def _fix_ligatures(text):
+    """Replace common PDF ligature characters with plain ASCII."""
+    return (text
+            .replace('\ufb01', 'fi')
+            .replace('\ufb02', 'fl')
+            .replace('\ufb00', 'ff')
+            .replace('\ufb03', 'ffi')
+            .replace('\ufb04', 'ffl'))
+
+
+def _normalize_topics(lines):
+    """Extract bullet-point topics from PDF text lines as a set.
+
+    Joins continuation lines, fixes ligatures, and stops at boilerplate.
+    """
+    topics = set()
+    current = None
+    for line in lines:
+        line = _fix_ligatures(line.strip())
+        if not line:
+            continue
+        if _BOILERPLATE_RE.search(line):
+            if current is not None:
+                topics.add(current)
+                current = None
+            continue
+        if '•' in line:
+            if current is not None:
+                topics.add(current)
+            current = line.split('•', 1)[1].strip()
+        elif current is not None:
+            current = current + ' ' + line
+    if current is not None:
+        topics.add(current)
+    return topics
+
+
+def _diff_revision(info):
+    """Diff initial vs latest PDF of a mid-version revision.
+
+    Uses set-based topic comparison to ignore reformatting noise.
+    Downloads PDFs at the first and latest commit SHAs, extracts topics,
+    and compares as sets. Returns a change summary string or None.
+    """
+    key = f"{info['first_sha']}:{info['latest_sha']}"
+    revisions = _load_diff_cache()["revisions"]
+    if key in revisions:
+        return revisions[key]
+
+    if not HAS_FITZ:
+        return None
+
+    import os
+
+    old_path = download_pdf_at_sha(info["filename"], info["first_sha"])
+    new_path = download_pdf_at_sha(info["filename"], info["latest_sha"])
+
+    if not old_path or not new_path:
+        for p in (old_path, new_path):
+            if p:
+                os.unlink(p)
+        return None
+
+    try:
+        old_topics = _normalize_topics(extract_pdf_text(old_path))
+        new_topics = _normalize_topics(extract_pdf_text(new_path))
+
+        added = new_topics - old_topics
+        removed = old_topics - new_topics
+
+        if not added and not removed:
+            detail = None
+        else:
+            parts = ([f"Removed: {t}" for t in sorted(removed)]
+                     + [f"Added: {t}" for t in sorted(added)])
+            detail = " · ".join(parts)
+        _cache_revision(info["first_sha"], info["latest_sha"], detail)
+        return detail
+    except Exception:
+        return None
+    finally:
+        os.unlink(old_path)
+        os.unlink(new_path)
+
+
 def _pdf_link(file_info, version):
     """Construct GitHub URL for a curriculum PDF."""
     entry = file_info.get(version)
@@ -604,11 +872,11 @@ def _pdf_link(file_info, version):
     return f"{CURRICULUM_GITHUB}/{quote(entry[1])}"
 
 
-def build_topic_footnotes(cert, diffs, file_info, row_order, start=0):
-    """Build superscript footnotes for topic changes, keyed to table row order.
+def build_topic_footnotes(cert, diffs, file_info, row_order, start=0, revision_info=None):
+    """Build superscript footnotes for topic changes and mid-version revisions.
 
     Returns (markers, footnotes, n) where:
-    - markers: {version: superscript_char} for versions with topic changes
+    - markers: {version: superscript_char} for versions with changes
     - footnotes: list of footnote lines in table order
     - n: next available footnote number (for global numbering across certs)
     """
@@ -656,6 +924,35 @@ def build_topic_footnotes(cert, diffs, file_info, row_order, start=0):
                     f"{sup} v{old_ver} → v{new_ver}: minor formatting changes")
 
         n += 1
+
+    # Mid-version revision footnotes
+    if revision_info:
+        for ver in row_order:
+            if ver not in revision_info:
+                continue
+            info = revision_info[ver]
+            sup = SUPERSCRIPTS[n] if n < len(SUPERSCRIPTS) else f"[{n + 1}]"
+            if ver in markers:
+                markers[ver] += sup
+            else:
+                markers[ver] = sup
+
+            detail = _diff_revision(info)
+            base = (f"{sup} v{ver} curriculum revised "
+                    f"{info['last_updated'].isoformat()}")
+            if detail:
+                footnotes.append(f"{base}: {detail}")
+            else:
+                initial_url = (f"https://github.com/cncf/curriculum/blob/"
+                               f"{info['first_sha']}/{quote(info['filename'])}")
+                revised_url = (f"https://github.com/cncf/curriculum/blob/"
+                               f"{info['latest_sha']}/{quote(info['filename'])}")
+                footnotes.append(
+                    f"{base}: "
+                    f"[initial]({initial_url}) · "
+                    f"[revised]({revised_url})")
+
+            n += 1
 
     return markers, footnotes, n
 
@@ -711,7 +1008,7 @@ def generate(today=None):
     footnote_num = 0
     tracker_data = {"updated": today.isoformat()}
     for cert in CERTS:
-        rows, avg_lag, day_name = build_cert_data(cert, all_versions, next_minor, next_ga, today)
+        rows, avg_lag, day_name, revision_info = build_cert_data(cert, all_versions, next_minor, next_ga, today)
         # Check if we got any actual switch data
         actual_switches = sum(1 for _, _, sw, _, _, sp in rows if sw and not sp)
         if actual_switches > 0:
@@ -720,7 +1017,8 @@ def generate(today=None):
         # Intent 2: topic changes
         diffs, file_info = diff_curricula(cert, diff_versions)
         row_order = [r[0] for r in rows]
-        markers, footnotes, footnote_num = build_topic_footnotes(cert, diffs, file_info, row_order, footnote_num)
+        markers, footnotes, footnote_num = build_topic_footnotes(
+            cert, diffs, file_info, row_order, footnote_num, revision_info)
 
         # Intent 3: machine-readable data for downstream automation
         current_version = None
@@ -732,9 +1030,26 @@ def generate(today=None):
             if sw_pred and switch and switch < today:
                 overdue = True
 
+        # topics_changed: cross-version diff (separate from mid-version revision)
+        topics_changed = False
+        if current_version:
+            for old_ver, new_ver, status, _ in diffs:
+                if new_ver == current_version and status not in ("identical", "unavailable"):
+                    topics_changed = True
+                    break
+
+        # curriculum_revised: mid-version update (current version only)
+        current_revised = False
+        current_revision_date = None
+        if current_version and current_version in revision_info:
+            current_revised = True
+            current_revision_date = revision_info[current_version]["last_updated"].isoformat()
+
         cert_entry = {
             "version": current_version,
-            "topics_changed": current_version in markers if current_version else False,
+            "topics_changed": topics_changed,
+            "curriculum_revised": current_revised,
+            "revision_date": current_revision_date,
             "overdue": overdue,
         }
 
@@ -777,6 +1092,8 @@ def generate(today=None):
                           f"using FAQ version with today as switch date")
                 tracker_data[cert]["version"] = faq_ver
                 tracker_data[cert]["topics_changed"] = False
+                tracker_data[cert]["curriculum_revised"] = False
+                tracker_data[cert]["revision_date"] = None
                 tracker_data[cert]["overdue"] = False
                 for key in ("version_in_1w", "version_in_2w", "version_in_1m"):
                     if _version_key(tracker_data[cert].get(key, "0.0")) < _version_key(faq_ver):
@@ -816,6 +1133,7 @@ def main():
             lines.extend(format_diff_output(cert, diffs))
 
         print("\n".join(lines), end="")
+        save_diff_cache()
         sys.exit(1 if _errors else 0)
 
     output, exit_code, tracker_data = generate()
@@ -835,6 +1153,7 @@ def main():
             json.dump(tracker_data, f, indent=2)
             f.write("\n")
 
+    save_diff_cache()
     sys.exit(exit_code)
 
 
