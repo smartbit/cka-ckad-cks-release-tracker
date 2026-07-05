@@ -38,7 +38,7 @@
 |:-----|:------------|:------------|:----:|:----:|:------:|
 | 1.37 | ~2026-08-26 | ~2026-11-03 | ~Tue |  ~69 |        |
 | 1.36 | 2026-04-22  | ~2026-06-30 | ~Tue |  ~69 | ~5    |
-| 1.35 | 2025-12-17  | ~2026-02-24 | ~Tue |  ~69 | ~131  |
+| 1.35 | 2025-12-17  | 2026-07-05 ⁷| Sun  |  200 |        |
 | 1.34 | 2025-08-27  | 2025-10-30  | Thu  |   64 |        |
 | 1.33 | 2025-04-23* | 2025-07-03 ⁵| Thu  |   71 |        |
 | 1.32 | 2024-12-11* | 2025-02-25 ⁶| Tue  |   76 |        |
@@ -47,7 +47,8 @@
 
 ~ Predicted: K8s GA + 68d avg (last 4), nearest Tue<br>
 ⁵ v1.32 → v1.33 topics changed: [v1.32 curriculum](https://github.com/cncf/curriculum/blob/master/old-versions/CKS_Curriculum%20v1.32.pdf) · [v1.33 curriculum](https://github.com/cncf/curriculum/blob/master/old-versions/CKS_Curriculum%20v1.33.pdf)<br>
-⁶ v1.32 curriculum revised 2025-04-08: Removed: Implement Pod-to-Pod encryption using Cilium · Added: Implement Pod-to-Pod encryption (Cilium, Istio)
+⁶ v1.32 curriculum revised 2025-04-08: Removed: Implement Pod-to-Pod encryption using Cilium · Added: Implement Pod-to-Pod encryption (Cilium, Istio)<br>
+⁷ v1.35 switch confirmed via LF FAQ on 2026-07-05; CNCF has not published a curriculum PDF
 
 \* EOL (end of life)
 
