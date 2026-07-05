@@ -15,7 +15,8 @@ Data sources (with fallbacks — Tactic D):
 Cross-validation (Tactic E):
   - Linux Foundation FAQ page              → validates current cert versions in tracker.json
   - FAQ-confirmed switches (exam updated but no curriculum artifact published,
-    e.g. CKS v1.35) persist across runs via tracker.json
+    e.g. CKS v1.35) persist across runs via tracker.json and are shown as
+    ~-marked estimated dates with a footnote
 
 Schema validation (Tactic C):
   - Validates API responses before use
@@ -50,12 +51,20 @@ CURRICULUM_CONTENTS = f"{CURRICULUM_REPO}/contents/"
 K8S_RELEASES = "https://api.github.com/repos/kubernetes/kubernetes/releases?per_page=100"
 SIG_RELEASE_README = "https://api.github.com/repos/kubernetes/sig-release/contents/releases/release-{}/README.md"
 LF_FAQ_URL = "https://docs.linuxfoundation.org/tc-docs/certification/faq-cka-ckad-cks"
+LF_FAQ_ANCHOR = f"{LF_FAQ_URL}#what-application-version-is-running-in-the-exam-environment"
 UA = "cka-ckad-cks-release-tracker/1.0"
 
 CERTS = ("CKA", "CKAD", "CKS")
 HISTORICAL = 7  # released versions to show (supported + recent unsupported)
 PREDICTION_WINDOW = 4  # last N releases used for average lag
 OUTLIER_SIGMA = 2.0  # exclude deltas beyond μ ± 2σ from prediction
+
+# Per-cert "Exam Details & Resources" pages (linked from section headings)
+CERT_PAGES = {
+    "CKA": "https://training.linuxfoundation.org/certification/certified-kubernetes-administrator-cka/",
+    "CKAD": "https://training.linuxfoundation.org/certification/certified-kubernetes-application-developer-ckad/",
+    "CKS": "https://training.linuxfoundation.org/certification/certified-kubernetes-security-specialist/",
+}
 
 
 # Filename patterns per cert (tried in order — Tactic D)
@@ -360,9 +369,10 @@ def _faq_override(cert, commits_ver, faq_versions, prev_tracker, today):
     The FAQ is authoritative for the version an exam currently runs on. When
     it is ahead of the curriculum commits (e.g. CKS v1.35, for which CNCF
     never published a PDF), the switch is real but has no commit to date it
-    by: the first run records today as the confirmation date, and later runs
+    by: the first run records today as the estimated date, and later runs
     reuse that date from the previous tracker.json so the condition is
-    expected state, not a repeated warning.
+    expected state, not a repeated warning. (The persisted faq_confirmed
+    date in tracker.json can be hand-corrected; it round-trips unchanged.)
 
     Returns (version, confirmed_date) or None.
     """
@@ -525,9 +535,14 @@ def build_cert_data(cert, all_versions, next_minor, next_ga, today):
     return rows, avg_lag, day_name, revision_info
 
 
-def format_table(cert, rows, avg_lag, day_name, today, markers=None):
+def format_table(cert, rows, avg_lag, day_name, today, markers=None,
+                 basis=None, estimated=None):
     """Format one cert's markdown table. Returns list of lines.
+
     markers: {version: superscript_char} for topic change footnotes.
+    basis: version range feeding the prediction average, e.g. "v1.31–v1.34".
+    estimated: versions whose switch date is an estimate (FAQ-derived) —
+    shown ~-marked like predictions, but never counted as overdue.
     """
     lines = []
 
@@ -536,7 +551,8 @@ def format_table(cert, rows, avg_lag, day_name, today, markers=None):
         for _, _, switch, _, _, sw_pred in rows
     )
 
-    lines.append(f"### {cert}")
+    page = CERT_PAGES.get(cert)
+    lines.append(f"### [{cert}]({page})" if page else f"### {cert}")
     lines.append("")
 
     cert_hdr = f"{cert} Switch"
@@ -550,7 +566,7 @@ def format_table(cert, rows, avg_lag, day_name, today, markers=None):
 
     for minor, ga, switch, supported, ga_pred, sw_pred in rows:
         gp = "~" if ga_pred else ""
-        sp = "~" if sw_pred else ""
+        sp = "~" if sw_pred or minor in (estimated or ()) else ""
         eol = "*" if not supported else ""
         marker = (markers or {}).get(minor, "")
         ga_str = f"{gp}{ga.isoformat()}{eol}" if ga else "TBD"
@@ -576,8 +592,8 @@ def format_table(cert, rows, avg_lag, day_name, today, markers=None):
         lines.append(row)
 
     lines.append("")
-    lines.append(f"~ Predicted: K8s GA + {avg_lag}d avg (last {PREDICTION_WINDOW}), "
-                 f"nearest {day_name}")
+    lines.append(f"~ Predicted: K8s GA + {avg_lag}d avg "
+                 f"({basis or f'last {PREDICTION_WINDOW}'}), nearest {day_name}")
 
     return lines
 
@@ -1069,7 +1085,15 @@ def generate(today=None):
     faq_versions = fetch_faq_versions()
     prev_tracker = _load_prev_tracker()
 
-    lines = []
+    lines = [
+        "# Historical exam dates CKA, CKAD & CKS",
+        "",
+        "Helps prepare for a Kubernetes exam by estimating when an exam "
+        "will switch to a new Kubernetes version.",
+        "",
+        f"Current exam versions can be found in [FAQ CKA, CKAD & CKS]({LF_FAQ_ANCHOR})",
+        "",
+    ]
     certs_with_data = 0
     footnote_num = 0
     tracker_data = {"updated": today.isoformat()}
@@ -1079,6 +1103,12 @@ def generate(today=None):
         actual_switches = sum(1 for _, _, sw, _, _, sp in rows if sw and not sp)
         if actual_switches > 0:
             certs_with_data += 1
+
+        # Prediction basis: the historical versions whose commit-derived
+        # switches feed the average (computed before any FAQ row patching)
+        hist_switched = [r[0] for r in rows[1:] if r[2] and not r[5]]
+        window = hist_switched[:PREDICTION_WINDOW]
+        basis = f"v{window[-1]}–v{window[0]}" if window else None
 
         # Intent 3: current version and overdue state from commit data
         current_version = None
@@ -1093,10 +1123,12 @@ def generate(today=None):
         # Tactic E: FAQ may supersede commit data (confirmation persists
         # across runs via tracker.json, so this is expected state, not an error)
         faq_confirmed = None
+        estimated = set()
         override = _faq_override(cert, current_version, faq_versions, prev_tracker, today)
         if override:
             current_version, faq_confirmed = override
             overdue = False
+            estimated.add(current_version)
             rows = [
                 (minor, ga,
                  faq_confirmed if minor == current_version else switch,
@@ -1115,8 +1147,8 @@ def generate(today=None):
             sup = SUPERSCRIPTS[footnote_num] if footnote_num < len(SUPERSCRIPTS) else f"[{footnote_num + 1}]"
             markers[current_version] = markers.get(current_version, "") + sup
             footnotes.append(
-                f"{sup} v{current_version} switch confirmed via LF FAQ on "
-                f"{faq_confirmed.isoformat()}; CNCF has not published a curriculum PDF")
+                f"{sup} v{current_version} switch date estimated via "
+                f"[LF FAQ]({LF_FAQ_ANCHOR}); CNCF has not published a curriculum PDF")
             footnote_num += 1
 
         # topics_changed: cross-version diff (separate from mid-version revision)
@@ -1155,7 +1187,8 @@ def generate(today=None):
 
         tracker_data[cert] = cert_entry
 
-        lines.extend(format_table(cert, rows, avg_lag, day_name, today, markers))
+        lines.extend(format_table(cert, rows, avg_lag, day_name, today, markers,
+                                  basis=basis, estimated=estimated))
         if footnotes:
             lines[-1] += "<br>"
             for fn in footnotes[:-1]:

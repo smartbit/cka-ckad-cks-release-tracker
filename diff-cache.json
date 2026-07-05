@@ -337,7 +337,7 @@
     }
   },
   "revisions": {
-    "1fa184a08f525048ba57578ea7a313649086c777:4d459532d84bf838ae70a6f449e01e9e5c4cfee6": "Removed: Choose and use the right workload resource (Development, DaemonSet, CronJob, etc.) \u00b7 Removed: Understand API deprecations \u00b7 Removed: Understand Application (SecurityContexts, Capabilities, etc.) \u00b7 Removed: Understanding requests, limits, and quotas \u00b7 Added: Choose and use the right workload resource (Deployment, DaemonSet, CronJob, etc.) \u00b7 Added: Understand API depreciations \u00b7 Added: Understand Application Security (SecurityContexts, Capabilities, etc.) \u00b7 Added: Understand requests, limits, quotas",
-    "c8f984fc6212a34dc632973bcdd2f1c951187e63:ce9e7b1d44fc812d69138de5d12e0909488f8246": "Removed: Implement Pod-to-Pod encryption using Cilium \u00b7 Added: Implement Pod-to-Pod encryption (Cilium, Istio)"
+    "1fa184a08f525048ba57578ea7a313649086c777:4d459532d84bf838ae70a6f449e01e9e5c4cfee6": "fixed minor typos: De~~velo~~ployment. Understand~~ing~~ requests, limits, and quotas. Understand Application -> Understand Application Security.",
+    "c8f984fc6212a34dc632973bcdd2f1c951187e63:ce9e7b1d44fc812d69138de5d12e0909488f8246": "Added *Istio* to: Implement Pod-to-Pod encryption (Cilium, Istio)"
   }
 }

@@ -1016,9 +1016,9 @@ class TestTacticEFaqValidation:
         assert data["CKS"]["faq_confirmed"] == "2026-03-17"
         assert any("faq-override-CKS" in w["source"] for w in tracker._warnings)
         assert not tracker._errors
-        # Table shows the confirmed date with an explanatory footnote
-        assert "2026-03-17" in output
-        assert "switch confirmed via LF FAQ" in output
+        # Table shows the estimated date, ~-marked, with an explanatory footnote
+        assert "~2026-03-17" in output
+        assert "switch date estimated via" in output
 
     def test_faq_override_reuses_persisted_date(self):
         """Later runs reuse the confirmed date from tracker.json, silently."""
@@ -1175,9 +1175,9 @@ class TestIntent4ExitCodes:
 
         assert code == 0
         assert output is not None
-        assert "### CKA" in output
-        assert "### CKAD" in output
-        assert "### CKS" in output
+        assert "### [CKA](" in output
+        assert "### [CKAD](" in output
+        assert "### [CKS](" in output
         assert "EOL" in output  # global footer
         assert data is not None
 
