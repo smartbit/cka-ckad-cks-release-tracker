@@ -21,15 +21,19 @@ jobs:
 
       - name: Run tracker
         id: run
+        # GH_TOKEN lets the script's gh CLI calls use the authenticated API
+        # (5000 req/h) instead of the unauthenticated 60 req/h shared limit.
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          python3 cka-ckad-cks-release-tracker.py > tables.md 2>errors.log
-          rc=$?
+          # `|| rc=$?` keeps the default `bash -e` shell from aborting the step
+          # before the exit code is captured; steps below handle it.
+          rc=0
+          python3 cka-ckad-cks-release-tracker.py > tables.md 2>errors.log || rc=$?
           echo "rc=$rc" >> "$GITHUB_OUTPUT"
-          exit 0  # don't fail the step; we handle exit codes below
 
       - name: Update README
         if: steps.run.outputs.rc == '0' || steps.run.outputs.rc == '1'
-        id: update
         run: |
           # Preserve footer (badges etc.) from existing README
           footer=""
@@ -42,21 +46,22 @@ jobs:
           else
             cat tables.md > README.new
           fi
-          if [ -f README.md ] && diff -q README.md README.new > /dev/null 2>&1; then
-            echo "changed=false" >> "$GITHUB_OUTPUT"
-          else
-            mv README.new README.md
-            echo "changed=true" >> "$GITHUB_OUTPUT"
-          fi
+          mv README.new README.md
 
       - name: Commit changes
-        if: steps.update.outputs.changed == 'true'
+        if: steps.run.outputs.rc == '0' || steps.run.outputs.rc == '1'
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add README.md tracker.json
-          git commit -m "Update cert tracker $(date -I)"
-          git push
+          git add README.md tracker.json diff-cache.json
+          # Commit when the README or the SHA cache changed; a tracker.json
+          # date bump alone is not worth a daily commit.
+          if git diff --cached --quiet -- README.md diff-cache.json; then
+            echo "No changes to commit"
+          else
+            git commit -m "Update cert tracker $(date -I)"
+            git push
+          fi
 
       - name: Close issue on success
         if: steps.run.outputs.rc == '0'
@@ -69,7 +74,9 @@ jobs:
           GH_TOKEN: ${{ github.token }}
 
       - name: Handle failure
-        if: steps.run.outputs.rc == '2'
+        # Any rc other than 0 (ok) or 1 (degraded) is a failure — including
+        # crashes and signals, not just the script's intentional exit 2.
+        if: steps.run.outputs.rc != '0' && steps.run.outputs.rc != '1'
         run: |
           errors=$(cat errors.log)
 
