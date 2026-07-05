@@ -947,8 +947,37 @@ class TestIntent3TrackerJson:
 
 # --- Tactic E: FAQ cross-validation ---
 
+@pytest.fixture(autouse=True)
+def _no_prev_tracker():
+    """Isolate tests from the repo's real tracker.json and reset log state."""
+    tracker._errors.clear()
+    tracker._warnings.clear()
+    with patch.object(tracker, "_load_prev_tracker", return_value={}):
+        yield
+
+
+def _cks_lagging_switch(cert, minor):
+    """CKS commits stop at 1.34; CKA/CKAD have 1.35."""
+    if cert == "CKS":
+        dates = {"1.34": date(2025, 10, 28)}
+    else:
+        dates = {"1.35": date(2026, 3, 3), "1.34": date(2025, 10, 28)}
+    return _switch(dates[minor]) if minor in dates else None
+
+
 class TestTacticEFaqValidation:
     """Linux Foundation FAQ page validates current cert versions."""
+
+    FAQ_135 = {"CKA": "1.35", "CKAD": "1.35", "CKS": "1.35"}
+
+    def _generate(self, faq, today=date(2026, 3, 17), cert_switch=None):
+        with patch.object(tracker, "released_versions", return_value=SAMPLE_ENDOFLIFE), \
+             patch.object(tracker, "cert_switch_date",
+                          side_effect=cert_switch or _cks_lagging_switch), \
+             patch.object(tracker, "next_release_date", return_value=date(2026, 4, 22)), \
+             patch.object(tracker, "diff_curricula", return_value=([], {})), \
+             patch.object(tracker, "fetch_faq_versions", return_value=faq):
+            return tracker.generate(today=today)
 
     def test_fetch_faq_versions_parses_html(self):
         """Parses cert versions from FAQ HTML."""
@@ -973,110 +1002,102 @@ class TestTacticEFaqValidation:
 
     def test_faq_overrides_tracker_when_newer(self):
         """FAQ version overrides tracker_data when FAQ is newer."""
-        tracker._errors.clear()
-
-        def mock_cert_switch(cert, minor):
-            if cert == "CKS":
-                dates = {"1.34": date(2025, 10, 28)}
-            else:
-                dates = {"1.35": date(2026, 3, 3), "1.34": date(2025, 10, 28)}
-            return _switch(dates[minor]) if minor in dates else None
-
-        # FAQ says CKS is on 1.35 — overrides commit-based 1.34
-        faq = {"CKA": "1.35", "CKAD": "1.35", "CKS": "1.35"}
-
-        with patch.object(tracker, "released_versions", return_value=SAMPLE_ENDOFLIFE), \
-             patch.object(tracker, "cert_switch_date", side_effect=mock_cert_switch), \
-             patch.object(tracker, "next_release_date", return_value=date(2026, 4, 22)), \
-             patch.object(tracker, "diff_curricula", return_value=([], {})), \
-             patch.object(tracker, "fetch_faq_versions", return_value=faq):
-            _, _, data = tracker.generate(today=date(2026, 3, 17))
+        _, _, data = self._generate(self.FAQ_135)
 
         assert data["CKS"]["version"] == "1.35"
         assert data["CKS"]["overdue"] is False
         assert data["CKS"]["topics_changed"] is False
 
-    def test_faq_override_updates_version_in_fields(self):
-        """FAQ override also updates version_in_* if they were lower."""
-        tracker._errors.clear()
+    def test_faq_override_first_seen_records_today(self):
+        """First detection: warning (not error), exit 0, today persisted."""
+        output, code, data = self._generate(self.FAQ_135)
 
-        def mock_cert_switch(cert, minor):
-            if cert == "CKS":
-                dates = {"1.34": date(2025, 10, 28)}
-            else:
-                dates = {"1.35": date(2026, 3, 3), "1.34": date(2025, 10, 28)}
+        assert code == 0
+        assert data["CKS"]["faq_confirmed"] == "2026-03-17"
+        assert any("faq-override-CKS" in w["source"] for w in tracker._warnings)
+        assert not tracker._errors
+        # Table shows the confirmed date with an explanatory footnote
+        assert "2026-03-17" in output
+        assert "switch confirmed via LF FAQ" in output
+
+    def test_faq_override_reuses_persisted_date(self):
+        """Later runs reuse the confirmed date from tracker.json, silently."""
+        prev = {"CKS": {"version": "1.35", "faq_confirmed": "2026-03-01"}}
+        with patch.object(tracker, "_load_prev_tracker", return_value=prev):
+            output, code, data = self._generate(self.FAQ_135)
+
+        assert code == 0
+        assert data["CKS"]["version"] == "1.35"
+        assert data["CKS"]["faq_confirmed"] == "2026-03-01"
+        assert "2026-03-01" in output
+        assert not tracker._warnings
+        assert not tracker._errors
+
+    def test_faq_unreachable_uses_persisted_confirmation(self):
+        """If the FAQ can't be fetched, a persisted confirmation still applies."""
+        prev = {"CKS": {"version": "1.35", "faq_confirmed": "2026-03-01"}}
+        with patch.object(tracker, "_load_prev_tracker", return_value=prev):
+            _, code, data = self._generate(None)
+
+        assert code == 0
+        assert data["CKS"]["version"] == "1.35"
+        assert data["CKS"]["faq_confirmed"] == "2026-03-01"
+
+    def test_faq_override_dropped_when_commits_catch_up(self):
+        """Once the curriculum PDF lands, commit data wins and the field goes away."""
+        def all_switched(cert, minor):
+            dates = {"1.35": date(2026, 3, 3), "1.34": date(2025, 10, 28)}
             return _switch(dates[minor]) if minor in dates else None
 
-        faq = {"CKA": "1.35", "CKAD": "1.35", "CKS": "1.35"}
+        prev = {"CKS": {"version": "1.35", "faq_confirmed": "2026-03-01"}}
+        with patch.object(tracker, "_load_prev_tracker", return_value=prev):
+            _, code, data = self._generate(self.FAQ_135, cert_switch=all_switched)
 
-        with patch.object(tracker, "released_versions", return_value=SAMPLE_ENDOFLIFE), \
-             patch.object(tracker, "cert_switch_date", side_effect=mock_cert_switch), \
-             patch.object(tracker, "next_release_date", return_value=date(2026, 4, 22)), \
-             patch.object(tracker, "diff_curricula", return_value=([], {})), \
-             patch.object(tracker, "fetch_faq_versions", return_value=faq):
-            _, _, data = tracker.generate(today=date(2026, 3, 17))
+        assert code == 0
+        assert data["CKS"]["version"] == "1.35"
+        assert "faq_confirmed" not in data["CKS"]
+
+    def test_faq_override_updates_version_in_fields(self):
+        """FAQ override also updates version_in_* if they were lower."""
+        _, _, data = self._generate(self.FAQ_135)
 
         assert data["CKS"]["version_in_1w"] == "1.35"
         assert data["CKS"]["version_in_2w"] == "1.35"
         assert data["CKS"]["version_in_1m"] == "1.35"
 
-    def test_faq_mismatch_logs_error(self):
-        """FAQ override logs an error (bumps exit code to 1)."""
-        tracker._errors.clear()
-
-        def mock_cert_switch(cert, minor):
-            if cert == "CKS":
-                dates = {"1.34": date(2025, 10, 28)}
-            else:
-                dates = {"1.35": date(2026, 3, 3), "1.34": date(2025, 10, 28)}
-            return _switch(dates[minor]) if minor in dates else None
-
-        faq = {"CKA": "1.35", "CKAD": "1.35", "CKS": "1.35"}
-
-        with patch.object(tracker, "released_versions", return_value=SAMPLE_ENDOFLIFE), \
-             patch.object(tracker, "cert_switch_date", side_effect=mock_cert_switch), \
-             patch.object(tracker, "next_release_date", return_value=date(2026, 4, 22)), \
-             patch.object(tracker, "diff_curricula", return_value=([], {})), \
-             patch.object(tracker, "fetch_faq_versions", return_value=faq):
-            _, code, _ = tracker.generate(today=date(2026, 3, 17))
-
-        assert code == 1
-        assert any("faq-override-CKS" in e["source"] for e in tracker._errors)
-
-    def test_faq_no_override_when_matching(self):
-        """No error logged when FAQ versions match tracker versions."""
-        tracker._errors.clear()
-
-        def mock_cert_switch(cert, minor):
+    def test_faq_prestaging_warns_not_errors(self):
+        """Commits ahead of FAQ (normal publication order) is a warning, exit 0."""
+        def all_switched(cert, minor):
             dates = {"1.35": date(2026, 3, 3), "1.34": date(2025, 10, 28)}
             return _switch(dates[minor]) if minor in dates else None
 
-        faq = {"CKA": "1.35", "CKAD": "1.35", "CKS": "1.35"}
+        faq = {"CKA": "1.34", "CKAD": "1.34", "CKS": "1.34"}
+        _, code, data = self._generate(faq, cert_switch=all_switched)
 
-        with patch.object(tracker, "released_versions", return_value=SAMPLE_ENDOFLIFE), \
-             patch.object(tracker, "cert_switch_date", side_effect=mock_cert_switch), \
-             patch.object(tracker, "next_release_date", return_value=date(2026, 4, 22)), \
-             patch.object(tracker, "diff_curricula", return_value=([], {})), \
-             patch.object(tracker, "fetch_faq_versions", return_value=faq):
-            _, code, _ = tracker.generate(today=date(2026, 3, 17))
+        assert code == 0
+        assert data["CKA"]["version"] == "1.35"
+        assert any("faq-mismatch" in w["source"] for w in tracker._warnings)
+        assert not tracker._errors
+
+    def test_faq_no_override_when_matching(self):
+        """Nothing logged when FAQ versions match commit-derived versions."""
+        def all_switched(cert, minor):
+            dates = {"1.35": date(2026, 3, 3), "1.34": date(2025, 10, 28)}
+            return _switch(dates[minor]) if minor in dates else None
+
+        _, code, _ = self._generate(self.FAQ_135, cert_switch=all_switched)
 
         assert code == 0
         assert not any("faq" in e["source"] for e in tracker._errors)
+        assert not any("faq" in w["source"] for w in tracker._warnings)
 
     def test_faq_failure_does_not_break(self):
         """FAQ fetch failure doesn't affect normal operation."""
-        tracker._errors.clear()
-
-        def mock_cert_switch(cert, minor):
+        def all_switched(cert, minor):
             dates = {"1.35": date(2026, 3, 3), "1.34": date(2025, 10, 28)}
             return _switch(dates[minor]) if minor in dates else None
 
-        with patch.object(tracker, "released_versions", return_value=SAMPLE_ENDOFLIFE), \
-             patch.object(tracker, "cert_switch_date", side_effect=mock_cert_switch), \
-             patch.object(tracker, "next_release_date", return_value=date(2026, 4, 22)), \
-             patch.object(tracker, "diff_curricula", return_value=([], {})), \
-             patch.object(tracker, "fetch_faq_versions", return_value=None):
-            output, code, data = tracker.generate(today=date(2026, 3, 17))
+        output, code, data = self._generate(None, cert_switch=all_switched)
 
         assert code == 0
         assert output is not None

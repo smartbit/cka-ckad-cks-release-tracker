@@ -14,11 +14,14 @@ Data sources (with fallbacks — Tactic D):
 
 Cross-validation (Tactic E):
   - Linux Foundation FAQ page              → validates current cert versions in tracker.json
+  - FAQ-confirmed switches (exam updated but no curriculum artifact published,
+    e.g. CKS v1.35) persist across runs via tracker.json
 
 Schema validation (Tactic C):
   - Validates API responses before use
   - Collects errors, reports to stderr
   - Exit codes: 0=ok, 1=degraded, 2=critical failure
+  - Warnings (expected conditions like an FAQ override) do not degrade the exit code
 
 Caching:
   - diff-cache.json stores PDF diff results keyed by immutable git blob/commit
@@ -72,10 +75,17 @@ CERT_FILE_PATTERNS = {
 # --- Error tracking ---
 
 _errors = []
+_warnings = []
 
 
 def log_error(source, msg):
     _errors.append({"source": source, "message": str(msg)})
+    print(f"ERROR: [{source}] {msg}", file=sys.stderr)
+
+
+def log_warning(source, msg):
+    """Notable but expected condition — reported, but does not degrade the exit code."""
+    _warnings.append({"source": source, "message": str(msg)})
     print(f"WARNING: [{source}] {msg}", file=sys.stderr)
 
 
@@ -332,6 +342,57 @@ def fetch_faq_versions():
         if m:
             versions[cert] = m.group(1)
     return versions if versions else None
+
+
+def _load_prev_tracker():
+    """Load the previous run's tracker.json for persisted state. Returns dict."""
+    try:
+        with open("tracker.json") as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _faq_override(cert, commits_ver, faq_versions, prev_tracker, today):
+    """Decide whether the LF FAQ supersedes the commit-derived version.
+
+    The FAQ is authoritative for the version an exam currently runs on. When
+    it is ahead of the curriculum commits (e.g. CKS v1.35, for which CNCF
+    never published a PDF), the switch is real but has no commit to date it
+    by: the first run records today as the confirmation date, and later runs
+    reuse that date from the previous tracker.json so the condition is
+    expected state, not a repeated warning.
+
+    Returns (version, confirmed_date) or None.
+    """
+    prev_cert = prev_tracker.get(cert)
+    if not isinstance(prev_cert, dict):
+        prev_cert = {}
+
+    faq_ver = (faq_versions or {}).get(cert)
+    if not faq_ver and prev_cert.get("faq_confirmed"):
+        # FAQ unreachable — trust the persisted confirmation
+        faq_ver = prev_cert.get("version")
+    if not faq_ver or not commits_ver or faq_ver == commits_ver:
+        return None
+
+    if _version_key(faq_ver) < _version_key(commits_ver):
+        log_warning(f"faq-mismatch-{cert}",
+                    f"Commits show v{commits_ver} but FAQ says v{faq_ver}; "
+                    f"possible pre-staging")
+        return None
+
+    if prev_cert.get("version") == faq_ver and prev_cert.get("faq_confirmed"):
+        try:
+            return faq_ver, date.fromisoformat(str(prev_cert["faq_confirmed"]))
+        except ValueError:
+            pass  # corrupt date — fall through to re-confirm today
+
+    log_warning(f"faq-override-{cert}",
+                f"FAQ says v{faq_ver} but commits show v{commits_ver}; "
+                f"using FAQ version with {today.isoformat()} as switch date")
+    return faq_ver, today
 
 
 # --- Prediction ---
@@ -1003,6 +1064,11 @@ def generate(today=None):
     diff_versions = [v["cycle"] for v in all_versions[:HISTORICAL]]
     diff_versions.reverse()
 
+    # Tactic E inputs: FAQ versions and the previous run's persisted state,
+    # needed before the cert loop so FAQ-confirmed switches show in the tables
+    faq_versions = fetch_faq_versions()
+    prev_tracker = _load_prev_tracker()
+
     lines = []
     certs_with_data = 0
     footnote_num = 0
@@ -1014,13 +1080,7 @@ def generate(today=None):
         if actual_switches > 0:
             certs_with_data += 1
 
-        # Intent 2: topic changes
-        diffs, file_info = diff_curricula(cert, diff_versions)
-        row_order = [r[0] for r in rows]
-        markers, footnotes, footnote_num = build_topic_footnotes(
-            cert, diffs, file_info, row_order, footnote_num, revision_info)
-
-        # Intent 3: machine-readable data for downstream automation
+        # Intent 3: current version and overdue state from commit data
         current_version = None
         overdue = False
         for minor, ga, switch, supported, ga_pred, sw_pred in rows:
@@ -1029,6 +1089,35 @@ def generate(today=None):
                 break
             if sw_pred and switch and switch < today:
                 overdue = True
+
+        # Tactic E: FAQ may supersede commit data (confirmation persists
+        # across runs via tracker.json, so this is expected state, not an error)
+        faq_confirmed = None
+        override = _faq_override(cert, current_version, faq_versions, prev_tracker, today)
+        if override:
+            current_version, faq_confirmed = override
+            overdue = False
+            rows = [
+                (minor, ga,
+                 faq_confirmed if minor == current_version else switch,
+                 supported, ga_pred,
+                 False if minor == current_version else sw_pred)
+                for minor, ga, switch, supported, ga_pred, sw_pred in rows
+            ]
+
+        # Intent 2: topic changes
+        diffs, file_info = diff_curricula(cert, diff_versions)
+        row_order = [r[0] for r in rows]
+        markers, footnotes, footnote_num = build_topic_footnotes(
+            cert, diffs, file_info, row_order, footnote_num, revision_info)
+
+        if faq_confirmed:
+            sup = SUPERSCRIPTS[footnote_num] if footnote_num < len(SUPERSCRIPTS) else f"[{footnote_num + 1}]"
+            markers[current_version] = markers.get(current_version, "") + sup
+            footnotes.append(
+                f"{sup} v{current_version} switch confirmed via LF FAQ on "
+                f"{faq_confirmed.isoformat()}; CNCF has not published a curriculum PDF")
+            footnote_num += 1
 
         # topics_changed: cross-version diff (separate from mid-version revision)
         topics_changed = False
@@ -1052,6 +1141,8 @@ def generate(today=None):
             "revision_date": current_revision_date,
             "overdue": overdue,
         }
+        if faq_confirmed:
+            cert_entry["faq_confirmed"] = faq_confirmed.isoformat()
 
         for key, days in (("version_in_1w", 7), ("version_in_2w", 14), ("version_in_1m", 30)):
             horizon = today + timedelta(days=days)
@@ -1075,33 +1166,6 @@ def generate(today=None):
     if certs_with_data == 0:
         log_error("output", "No actual cert switch data found for any cert")
         return None, 2, None
-
-    # Tactic E: validate tracker_data against Linux Foundation FAQ
-    faq_versions = fetch_faq_versions()
-    if faq_versions:
-        for cert in CERTS:
-            if cert not in faq_versions or cert not in tracker_data:
-                continue
-            faq_ver = faq_versions[cert]
-            tracker_ver = tracker_data[cert].get("version")
-            if not tracker_ver or faq_ver == tracker_ver:
-                continue
-            if _version_key(faq_ver) > _version_key(tracker_ver):
-                log_error(f"faq-override-{cert}",
-                          f"FAQ says v{faq_ver} but commits show v{tracker_ver}; "
-                          f"using FAQ version with today as switch date")
-                tracker_data[cert]["version"] = faq_ver
-                tracker_data[cert]["topics_changed"] = False
-                tracker_data[cert]["curriculum_revised"] = False
-                tracker_data[cert]["revision_date"] = None
-                tracker_data[cert]["overdue"] = False
-                for key in ("version_in_1w", "version_in_2w", "version_in_1m"):
-                    if _version_key(tracker_data[cert].get(key, "0.0")) < _version_key(faq_ver):
-                        tracker_data[cert][key] = faq_ver
-            else:
-                log_error(f"faq-mismatch-{cert}",
-                          f"Commits show v{tracker_ver} but FAQ says v{faq_ver}; "
-                          f"possible pre-staging")
 
     lines.append("\\* EOL (end of life)")
     lines.append("")
@@ -1137,6 +1201,11 @@ def main():
         sys.exit(1 if _errors else 0)
 
     output, exit_code, tracker_data = generate()
+
+    if _warnings:
+        print(f"\n--- Warnings ({len(_warnings)}) ---", file=sys.stderr)
+        for w in _warnings:
+            print(f"  [{w['source']}] {w['message']}", file=sys.stderr)
 
     if _errors:
         print(f"\n--- Errors ({len(_errors)}) ---", file=sys.stderr)
