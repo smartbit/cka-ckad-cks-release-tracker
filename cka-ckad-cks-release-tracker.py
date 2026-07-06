@@ -1148,7 +1148,7 @@ def generate(today=None):
             markers[current_version] = markers.get(current_version, "") + sup
             footnotes.append(
                 f"{sup} v{current_version} switch date estimated via "
-                f"[LF FAQ]({LF_FAQ_ANCHOR}); CNCF has not published a curriculum PDF")
+                f"[FAQ CKA, CKAD & CKS]({LF_FAQ_ANCHOR}); CNCF has not published a curriculum PDF")
             footnote_num += 1
 
         # topics_changed: cross-version diff (separate from mid-version revision)

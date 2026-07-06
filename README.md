@@ -54,7 +54,7 @@ Current exam versions can be found in [FAQ CKA, CKAD & CKS](https://docs.linuxfo
 ~ Predicted: K8s GA + 68d avg (v1.31–v1.34), nearest Tue<br>
 ⁵ v1.32 → v1.33 topics changed: [v1.32 curriculum](https://github.com/cncf/curriculum/blob/master/old-versions/CKS_Curriculum%20v1.32.pdf) · [v1.33 curriculum](https://github.com/cncf/curriculum/blob/master/old-versions/CKS_Curriculum%20v1.33.pdf)<br>
 ⁶ v1.32 curriculum revised 2025-04-08: Added *Istio* to: Implement Pod-to-Pod encryption (Cilium, Istio)<br>
-⁷ v1.35 switch date estimated via [LF FAQ](https://docs.linuxfoundation.org/tc-docs/certification/faq-cka-ckad-cks#what-application-version-is-running-in-the-exam-environment); CNCF has not published a curriculum PDF
+⁷ v1.35 switch date estimated via [FAQ CKA, CKAD & CKS](https://docs.linuxfoundation.org/tc-docs/certification/faq-cka-ckad-cks#what-application-version-is-running-in-the-exam-environment); CNCF has not published a curriculum PDF
 
 \* EOL (end of life)
 
