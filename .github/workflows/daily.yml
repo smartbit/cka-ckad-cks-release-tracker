@@ -74,11 +74,18 @@ jobs:
           GH_TOKEN: ${{ github.token }}
 
       - name: Handle failure
-        # Any rc other than 0 (ok) or 1 (degraded) is a failure — including
-        # crashes and signals, not just the script's intentional exit 2.
-        if: steps.run.outputs.rc != '0' && steps.run.outputs.rc != '1'
+        # Runs when the tracker exits with anything other than 0 (ok) or
+        # 1 (degraded) — crashes and signals included — AND when any earlier
+        # step failed (checkout, pip, README update, push). `failure()` is
+        # required for the latter: without a status-check function GitHub
+        # implies `success()` and skips this step after a red step, which is
+        # how failures went unreported from May to July 2026.
+        if: failure() || (steps.run.outputs.rc != '0' && steps.run.outputs.rc != '1')
         run: |
-          errors=$(cat errors.log)
+          # rc is empty when a step failed before/after the tracker ran
+          rc='${{ steps.run.outputs.rc }}'
+          rc="${rc:-none (a workflow step failed; see the run log)}"
+          errors=$(cat errors.log 2>/dev/null || echo "no errors.log — a workflow step failed; see the run log")
 
           # Check for existing open issue
           existing=$(gh issue list --label tracker-failure --state open --json number,createdAt --jq '.[0] // empty')
@@ -90,7 +97,7 @@ jobs:
               --body "$(cat <<EOF
           ## Tracker failed
 
-          Exit code: ${{ steps.run.outputs.rc }}
+          Exit code: $rc
 
           ### Errors
           \`\`\`
@@ -111,7 +118,7 @@ jobs:
             gh issue comment "$issue_num" \
               --body "Still failing as of $(date -I). [Run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})"
 
-            # Archive if failure persists 30+ days
+            # Make repo private if failure persists 30+ days
             created_epoch=$(date -d "$created" +%s)
             now_epoch=$(date +%s)
             days=$(( (now_epoch - created_epoch) / 86400 ))
@@ -122,5 +129,10 @@ jobs:
                 gh repo edit --visibility private --accept-visibility-change-consequences
             fi
           fi
+
+          # Fail the run so the workflow badge goes red; without this a
+          # tracker failure concludes "success" and the badge stays green
+          # while the 30-day clock ticks.
+          exit 1
         env:
           GH_TOKEN: ${{ github.token }}

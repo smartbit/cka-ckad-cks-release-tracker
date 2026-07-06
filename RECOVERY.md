@@ -2,25 +2,30 @@
 
 ## Failure workflow
 
-1. Script fails → GitHub Issue opened (label: `tracker-failure`)
-2. Failures persist 30+ days → repo auto-archived via `gh repo archive`
-3. Actions stop (archived repos are read-only)
-4. Manual recovery required (see below)
+1. Daily run fails (tracker exit code other than 0/1, **or** any workflow step fails) → GitHub Issue opened (label: `tracker-failure`) and the run goes red
+2. Each further failing day → comment added to that issue
+3. Issue open 30+ days → repo made **private** (`gh repo edit --visibility private`, authenticated via the `ARCHIVE_PAT` secret)
+4. Actions keep running on the private repo, but the page and badges disappear for visitors
+5. Manual recovery required (see below)
 
-## Restoring an archived repo
+## Restoring a repo that was made private
 
 ```bash
-# 1. Un-archive
-gh repo unarchive smartbit/cka-ckad-cks-release-tracker --yes
-
-# 2. Check what broke (read the issue)
+# 1. Check what broke (read the issue)
 gh issue list --label tracker-failure --state open
 
-# 3. Fix the script, push, then trigger manually
+# 2. Fix the script, push, then trigger manually
 gh workflow run daily.yml
 
-# 4. The workflow auto-closes the issue on success
+# 3. The workflow auto-closes the issue on success
+
+# 4. Make the repo public again
+gh repo edit smartbit/cka-ckad-cks-release-tracker \
+  --visibility public --accept-visibility-change-consequences
 ```
+
+> **Warning:** going private permanently removes stars and watchers and detaches
+> forks. Restoring public visibility does **not** bring them back.
 
 ## Common failure modes
 
