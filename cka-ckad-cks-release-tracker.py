@@ -27,6 +27,9 @@ Schema validation (Tactic C):
 Caching:
   - diff-cache.json stores PDF diff results keyed by immutable git blob/commit
     SHAs, so entries never go stale; committed by CI alongside tracker.json
+  - GitHub API responses (including 404s) are cached in memory for the run
+  - Auth: GH_TOKEN/GITHUB_TOKEN env, else `gh auth token`; a rejected token
+    (401) retries that request unauthenticated instead of failing the run
 
 Requires: python 3.9+, gh CLI (optional, used for authenticated GitHub API).
 Optional: pymupdf (for detailed topic change extraction).
@@ -34,13 +37,15 @@ Optional: pymupdf (for detailed topic change extraction).
 
 import base64
 import json
+import os
 import re
 import shutil
 import subprocess
 import sys
 from collections import Counter
+from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime, timedelta
-from urllib.error import URLError
+from urllib.error import HTTPError, URLError
 from urllib.parse import quote
 from urllib.request import Request, urlopen
 
@@ -124,30 +129,77 @@ def validate_commits(data):
 
 # --- HTTP helpers ---
 
+_token = None
+_token_checked = False
+_json_cache = {}
+
+
+def _get_github_token():
+    """Retrieve GitHub token from environment or gh CLI once."""
+    global _token, _token_checked
+    if not _token_checked:
+        _token = os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN")
+        if not _token and shutil.which("gh"):
+            try:
+                r = subprocess.run(["gh", "auth", "token"], capture_output=True, text=True, timeout=5)
+                if r.returncode == 0 and r.stdout.strip():
+                    _token = r.stdout.strip()
+            except Exception:
+                pass
+        _token_checked = True
+    return _token
+
+
 def fetch_json(url):
-    """Fetch JSON, preferring gh CLI for GitHub URLs (authenticated, higher rate limit)."""
-    if "api.github.com" in url and shutil.which("gh"):
-        path = url.replace("https://api.github.com/", "")
-        r = subprocess.run(["gh", "api", path], capture_output=True, text=True, timeout=30)
-        if r.returncode == 0:
-            return json.loads(r.stdout)
-    req = Request(url, headers={"User-Agent": UA})
-    with urlopen(req, timeout=30) as resp:
-        return json.loads(resp.read())
+    """Fetch JSON with in-memory caching and authenticated headers for GitHub API."""
+    if url in _json_cache:
+        data = _json_cache[url]
+        if data is None:
+            raise HTTPError(url, 404, "Not Found", {}, None)
+        return data
+
+    token = _get_github_token() if "api.github.com" in url else None
+    headers = {"User-Agent": UA}
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+
+    req = Request(url, headers=headers)
+    try:
+        with urlopen(req, timeout=30) as resp:
+            data = json.loads(resp.read().decode())
+            _json_cache[url] = data
+            return data
+    except HTTPError as e:
+        if e.code == 404:
+            _json_cache[url] = None
+            raise
+        # Invalid token (401): retry unauthenticated — a stale GH_TOKEN must
+        # degrade the run, not kill it; the warning exposes the bad token
+        if e.code == 401 and token:
+            log_warning("github-auth", "GitHub rejected the token (401); retrying unauthenticated")
+            req = Request(url, headers={"User-Agent": UA})
+            try:
+                with urlopen(req, timeout=30) as resp:
+                    data = json.loads(resp.read().decode())
+                    _json_cache[url] = data
+                    return data
+            except HTTPError:
+                pass  # unauthenticated attempt also failed — report the 401
+        # Rate limit or auth fallback to gh CLI if token wasn't available
+        if "api.github.com" in url and shutil.which("gh") and not token:
+            path = url.replace("https://api.github.com/", "")
+            r = subprocess.run(["gh", "api", path], capture_output=True, text=True, timeout=30)
+            if r.returncode == 0:
+                data = json.loads(r.stdout)
+                _json_cache[url] = data
+                return data
+        raise
 
 
 def fetch_raw(url):
     """Fetch raw text content via GitHub contents API."""
-    if "api.github.com" in url and shutil.which("gh"):
-        path = url.replace("https://api.github.com/", "")
-        r = subprocess.run(["gh", "api", path], capture_output=True, text=True, timeout=30)
-        if r.returncode == 0:
-            data = json.loads(r.stdout)
-            return base64.b64decode(data["content"]).decode()
-    req = Request(url, headers={"User-Agent": UA})
-    with urlopen(req, timeout=30) as resp:
-        data = json.loads(resp.read())
-        return base64.b64decode(data["content"]).decode()
+    data = fetch_json(url)
+    return base64.b64decode(data["content"]).decode()
 
 
 # --- Data fetchers with fallbacks (Tactic D) ---
@@ -480,6 +532,11 @@ def build_cert_data(cert, all_versions, next_minor, next_ga, today):
     and revision_info is {version: switch_info_dict} for versions with
     genuine mid-version curriculum revisions (file moves excluded).
     """
+    # Pre-fetch switch dates for next_minor and historical versions concurrently
+    versions_to_fetch = [next_minor] + [v["cycle"] for v in all_versions[:HISTORICAL]]
+    with ThreadPoolExecutor(max_workers=6) as pool:
+        list(pool.map(lambda m: cert_switch_date(cert, m), versions_to_fetch))
+
     hist = []
     raw_revision_info = {}
     for v in all_versions[:HISTORICAL]:
@@ -606,10 +663,14 @@ MAJOR_DIFF_THRESHOLD = 15  # changed lines — above this, link to PDFs instead
 SUPERSCRIPTS = "¹²³⁴⁵⁶⁷⁸⁹"
 
 try:
-    import fitz  # PyMuPDF — optional dependency
+    import pymupdf as fitz  # PyMuPDF — modern import without deprecation warning
     HAS_FITZ = True
 except ImportError:
-    HAS_FITZ = False
+    try:
+        import fitz  # PyMuPDF fallback
+        HAS_FITZ = True
+    except ImportError:
+        HAS_FITZ = False
 
 
 # --- SHA-keyed diff cache ---

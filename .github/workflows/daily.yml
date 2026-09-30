@@ -21,8 +21,9 @@ jobs:
 
       - name: Run tracker
         id: run
-        # GH_TOKEN lets the script's gh CLI calls use the authenticated API
-        # (5000 req/h) instead of the unauthenticated 60 req/h shared limit.
+        # GH_TOKEN is used by the script directly for authenticated API
+        # requests (5000 req/h) instead of the unauthenticated 60 req/h
+        # shared limit; the gh CLI fallback picks it up as well.
         env:
           GH_TOKEN: ${{ github.token }}
         run: |

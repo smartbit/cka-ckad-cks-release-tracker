@@ -1,4 +1,3 @@
-warning: The `fitz` API is deprecated and will be removed in future. Use `import pymupdf` instead.
 # Historical exam dates CKA, CKAD & CKS
 
 Helps prepare for a Kubernetes exam by estimating when an exam will switch to a new Kubernetes version.
