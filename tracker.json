@@ -1,14 +1,14 @@
 {
-  "updated": "2026-10-01",
+  "updated": "2026-10-02",
   "CKA": {
-    "version": "1.35",
+    "version": "1.37",
     "topics_changed": false,
     "curriculum_revised": false,
     "revision_date": null,
-    "overdue": true,
-    "version_in_1w": "1.36",
-    "version_in_2w": "1.36",
-    "version_in_1m": "1.36"
+    "overdue": false,
+    "version_in_1w": "1.37",
+    "version_in_2w": "1.37",
+    "version_in_1m": "1.37"
   },
   "CKAD": {
     "version": "1.37",
@@ -16,7 +16,6 @@
     "curriculum_revised": false,
     "revision_date": null,
     "overdue": false,
-    "faq_confirmed": "2026-10-01",
     "version_in_1w": "1.37",
     "version_in_2w": "1.37",
     "version_in_1m": "1.37"
