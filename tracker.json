@@ -1,5 +1,5 @@
 {
-  "updated": "2026-11-02",
+  "updated": "2026-11-03",
   "CKA": {
     "version": "1.37",
     "topics_changed": false,
@@ -21,12 +21,11 @@
     "version_in_1m": "1.37"
   },
   "CKS": {
-    "version": "1.35",
+    "version": "1.37",
     "topics_changed": false,
     "curriculum_revised": false,
     "revision_date": null,
     "overdue": false,
-    "faq_confirmed": "2026-05-28",
     "version_in_1w": "1.37",
     "version_in_2w": "1.37",
     "version_in_1m": "1.37"
